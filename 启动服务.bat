@@ -1,12 +1,15 @@
 @echo off
 chcp 65001 >nul
-title 飞书 Todo 服务
+cd /d "%~dp0"
+title Feishu Todo Bot
 
 echo ========================================
-echo   飞书 Todo 服务
+echo   Feishu Todo Service
 echo ========================================
 echo.
-echo 正在启动服务...
+echo Starting service...
+echo Port: 17234
 echo.
 
 npm run dev
+pause
