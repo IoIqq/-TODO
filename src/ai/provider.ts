@@ -4,14 +4,48 @@
  */
 
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  // 工具调用相关（OpenAI Function Calling）
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
+  name?: string;
+}
+
+export interface ToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export interface ToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: {
+      type: 'object';
+      properties: Record<string, any>;
+      required?: string[];
+    };
+  };
 }
 
 export interface ChatCompletionParams {
   messages: ChatMessage[];
   temperature?: number;
   model?: string;
+  tools?: ToolDefinition[];
+  tool_choice?: 'auto' | 'none' | { type: 'function'; function: { name: string } };
+}
+
+export interface ChatCompletionResult {
+  content: string | null;
+  tool_calls?: ToolCall[];
+  finish_reason?: string;
 }
 
 export interface VisionParams {
@@ -29,11 +63,18 @@ export interface AIProvider {
   readonly name: string;
 
   /**
-   * 聊天补全
+   * 聊天补全（简单版本，返回纯文本）
    * @param params 聊天参数
    * @returns AI 响应内容
    */
   chat(params: ChatCompletionParams): Promise<string>;
+
+  /**
+   * 聊天补全（完整版本，支持工具调用）
+   * @param params 聊天参数
+   * @returns 完整的响应（content + tool_calls）
+   */
+  chatComplete?(params: ChatCompletionParams): Promise<ChatCompletionResult>;
 
   /**
    * 视觉识别（可选）

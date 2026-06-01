@@ -1,9 +1,28 @@
 import http from "node:http";
 import { loadConfig } from "./config.js";
 import { createTodoBotApp } from "./app.js";
+import { initDatabase, closeDatabase } from "./storage/index.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  
+  // 初始化本地数据库
+  const dataDir = process.env.DATA_DIR?.trim() || "./data";
+  initDatabase(dataDir);
+
+  // 优雅关闭数据库
+  const shutdown = (signal: string) => {
+    console.log(`\n[server] Received ${signal}, shutting down...`);
+    try {
+      closeDatabase();
+    } catch (error) {
+      console.error("[server] Error closing database:", error);
+    }
+    process.exit(0);
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+
   const app = createTodoBotApp(config);
 
   const server = http.createServer(async (req, res) => {

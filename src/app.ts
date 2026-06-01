@@ -14,6 +14,8 @@ import {
   formatTaskResult,
 } from "./formatters/index.js";
 import { OperationHistory } from "./history/operation-history.js";
+import { Agent } from "./agent/agent.js";
+import { ConversationStore } from "./storage/index.js";
 
 export interface TodoBotDependencies {
   fetchImpl?: typeof fetch;
@@ -107,6 +109,11 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
   const operationHistory = new OperationHistory(20);
   const seenEvents = new Set<string>();
   const pendingCLIOperations = new Map<string, { intent: IntentAnalysisResult; messageId: string; userId?: string }>();
+  
+  // Agent（智能体）
+  const agent = new Agent(config, client, cliExecutor);
+  const enableAgent = (process.env.ENABLE_AGENT?.toLowerCase() ?? "true") !== "false";
+  console.log(`[app] Agent ${agent.isAvailable() && enableAgent ? "enabled" : "disabled"} (available=${agent.isAvailable()}, configured=${enableAgent})`);
 
   function rememberEvent(eventId: string): void {
     seenEvents.add(eventId);
@@ -329,6 +336,62 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
 • /帮助 或 /help - 显示此帮助
 
 💡 **提示：** 也可以直接用自然语言，AI 会自动识别你的意图！`;
+  }
+
+  /**
+   * Agent 模式：智能体处理消息（多轮工具调用）
+   */
+  async function handleAgent(text: string, messageId: string, userId: string): Promise<void> {
+    try {
+      console.log(`[agent] processing: "${text.substring(0, 50)}"`);
+      const startTime = Date.now();
+
+      // 思考过程推送给用户（可见）
+      const thinkingMessages: string[] = [];
+      let lastThinkingTime = 0;
+
+      const result = await agent.run({
+        userInput: text,
+        userId,
+        messageId,
+        onThinking: async (thinkingText: string) => {
+          thinkingMessages.push(thinkingText);
+          // 防止刷屏：每 1.5 秒最多发一条
+          const now = Date.now();
+          if (now - lastThinkingTime > 1500) {
+            try {
+              await client.replyText(messageId, thinkingText);
+              lastThinkingTime = now;
+            } catch (error) {
+              console.error("[agent] thinking notify failed:", error);
+            }
+          }
+        },
+      });
+
+      const duration = Date.now() - startTime;
+      console.log(`[agent] completed in ${duration}ms, ${result.steps} steps, ${result.toolCalls.length} tool calls`);
+
+      // 最终回复
+      await client.replyText(messageId, result.finalAnswer);
+
+      // 保存助手回复到本地和飞书
+      try {
+        ConversationStore.save({
+          userId,
+          role: "assistant",
+          content: result.finalAnswer,
+          timestamp: Date.now(),
+        });
+        await client.saveChatMessage(userId, messageId, "assistant", result.finalAnswer);
+      } catch (error) {
+        console.error("[storage] failed to save assistant reply:", error);
+      }
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error("[agent] failed:", errMsg);
+      await client.replyText(messageId, `❌ Agent 出错：${errMsg.substring(0, 200)}`);
+    }
   }
 
   /**
@@ -584,9 +647,22 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
       try {
         const actorOpenId = envelope.event.sender?.sender_id?.open_id;
         
-        // 保存用户消息到对话历史
+        // 保存用户消息到对话历史（飞书多维表格）
         if (actorOpenId) {
           await client.saveChatMessage(actorOpenId, message.message_id, "user", text);
+          
+          // 同时保存到本地 SQLite
+          try {
+            ConversationStore.save({
+              userId: actorOpenId,
+              messageId: message.message_id,
+              role: "user",
+              content: text,
+              timestamp: Date.now(),
+            });
+          } catch (error) {
+            console.error("[storage] failed to save conversation:", error);
+          }
         }
 
         // 1. 优先处理快捷命令（精确匹配，最高优先级）
@@ -606,7 +682,15 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
           }
         }
 
-        // 2. AI 智能意图识别（核心路由）
+        // 2. Agent 模式（推荐）
+        if (enableAgent && agent.isAvailable() && actorOpenId) {
+          await handleAgent(text, message.message_id, actorOpenId);
+          return;
+        }
+
+        // ========== 以下是 Fallback：Agent 不可用时的旧路由 ==========
+
+        // 2b. AI 智能意图识别
         const intent = await aiClient.analyzeIntent(text);
         console.log(`[router] intent=${intent.type} confidence=${intent.confidence} input="${text.substring(0, 30)}"`);
 
@@ -631,23 +715,19 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
 
             case 'chat':
             case 'unknown': {
-              // 闲聊或不确定 → AI 简洁回答
               await handleChat(text, message.message_id, actorOpenId);
               return;
             }
 
             case 'todo_create':
             case 'todo':
-              // 走待办创建流程（下方）
               break;
 
             case 'todo_complete':
-              // TODO: 后续支持完成待办
               await handleChat(text, message.message_id, actorOpenId);
               return;
           }
         } else {
-          // 低置信度 → 默认走 AI 智能回答（不再粗暴当作待办）
           console.log(`[router] low confidence, fallback to chat`);
           await handleChat(text, message.message_id, actorOpenId);
           return;

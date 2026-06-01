@@ -45,6 +45,13 @@ feishu-todo-complete/
 feishu-todo-deploy/
 deploy-template/
 
+# 本地数据存储（SQLite）
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
 # 操作系统
 .DS_Store
 .DS_Store?
