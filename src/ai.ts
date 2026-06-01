@@ -263,15 +263,13 @@ function normalizeDueTimestamp(value: string): number | null {
 }
 
 export function toBaseRecordFields(item: TodoParseItem): FeishuBaseRecord["fields"] {
+  // 仅写入用户表格中实际存在的字段，可选字段交由 createOneRecord 自动剔除
   const fields: FeishuBaseRecord["fields"] = {
     待办事项: item.title,
     优先级: item.priority === "high" ? "🔴P0-高优" : item.priority === "low" ? "🟢P2-低优" : "🟡P1-一般",
     是否已完成: false,
-    创建时间: Date.now(), // 所有任务都添加创建时间
+    创建时间: Date.now(),
   };
-
-  // 添加风险评估字段（默认为中风险）
-  fields["AI 特办事项风险总"] = item.risk === "high" ? "🔴高风险" : item.risk === "low" ? "🟢低风险" : "🟡中风险";
 
   if (item.due) {
     const timestamp = normalizeDueTimestamp(item.due.timestamp);
@@ -284,10 +282,13 @@ export function toBaseRecordFields(item: TodoParseItem): FeishuBaseRecord["field
     fields["执行人"] = [{ id: item.assigneeOpenId }];
   }
 
-  // 添加备注字段
+  // 备注字段（可选，表格无此字段时会被自动剔除）
   if (item.notes && item.notes.trim()) {
     fields["备注"] = item.notes.trim();
   }
+
+  // 注意：不写入 "AI 任务风险判断" 字段
+  // 该字段是用户表格中的 AI 生成字段，由飞书 AI 自动填充，不应由我们写入
 
   return fields;
 }
