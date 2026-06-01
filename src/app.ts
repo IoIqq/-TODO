@@ -331,6 +331,38 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
 💡 **提示：** 也可以直接用自然语言，AI 会自动识别你的意图！`;
   }
 
+  /**
+   * 智能聊天回复
+   */
+  async function handleChat(text: string, messageId: string, userId?: string): Promise<void> {
+    try {
+      console.log(`[chat] handling chat: "${text.substring(0, 50)}"`);
+      
+      // 获取最近对话历史用于上下文
+      const chatHistory = userId 
+        ? await client.getChatHistory(userId, Math.min(config.chatMemoryLength, 6)) 
+        : [];
+
+      const reply = await aiClient.chat({
+        userInput: text,
+        chatHistory,
+      });
+
+      if (reply) {
+        await client.replyText(messageId, reply);
+      } else {
+        // AI 未启用或失败时给个基础回复
+        await client.replyText(
+          messageId,
+          "我可以帮你管理待办、查日程、找联系人、查文档。\n试试发送：/帮助"
+        );
+      }
+    } catch (error) {
+      console.error("[chat] failed:", error);
+      await client.replyText(messageId, "抱歉，刚才走神了，可以再说一次吗？");
+    }
+  }
+
   async function handleQueryCommand(text: string, messageId: string): Promise<void> {
     try {
       console.log(`[feishu] handling query command: ${text}`);
@@ -557,7 +589,7 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
           await client.saveChatMessage(actorOpenId, message.message_id, "user", text);
         }
 
-        // 1. 优先处理快捷命令
+        // 1. 优先处理快捷命令（精确匹配，最高优先级）
         const shortcut = parseShortcutCommand(text);
         if (shortcut) {
           if (shortcut.kind === 'system') {
@@ -574,28 +606,66 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
           }
         }
 
-        // 2. 自然语言查询命令
-        if (text.match(/查询|任务列表|我的任务|今天.*任务|明天.*任务|本周.*任务/)) {
-          await handleQueryCommand(text, message.message_id);
+        // 2. AI 智能意图识别（核心路由）
+        const intent = await aiClient.analyzeIntent(text);
+        console.log(`[router] intent=${intent.type} confidence=${intent.confidence} input="${text.substring(0, 30)}"`);
+
+        // 高置信度才走 AI 路由（>=0.6），避免误判
+        if (intent.confidence >= 0.6) {
+          switch (intent.type) {
+            case 'todo_query':
+              await handleQueryCommand(text, message.message_id);
+              return;
+
+            case 'cli_calendar':
+            case 'cli_contact':
+            case 'cli_docs':
+            case 'cli_approval':
+            case 'cli_task':
+            case 'cli_message':
+              if (cliExecutor && config.enableSmartAssistant) {
+                await handleCLIOperation(intent, message.message_id, actorOpenId);
+                return;
+              }
+              break;
+
+            case 'chat':
+            case 'unknown': {
+              // 闲聊或不确定 → AI 简洁回答
+              await handleChat(text, message.message_id, actorOpenId);
+              return;
+            }
+
+            case 'todo_create':
+            case 'todo':
+              // 走待办创建流程（下方）
+              break;
+
+            case 'todo_complete':
+              // TODO: 后续支持完成待办
+              await handleChat(text, message.message_id, actorOpenId);
+              return;
+          }
+        } else {
+          // 低置信度 → 默认走 AI 智能回答（不再粗暴当作待办）
+          console.log(`[router] low confidence, fallback to chat`);
+          await handleChat(text, message.message_id, actorOpenId);
           return;
         }
 
-        // 3. AI 意图识别
-        if (cliExecutor && config.enableSmartAssistant) {
-          const intent = await aiClient.analyzeIntent(text);
-          
-          if (intent.confidence > 0.7 && intent.type !== 'todo') {
-            await handleCLIOperation(intent, message.message_id, actorOpenId);
-            return;
-          }
-        }
-
-        // 4. 待办解析
+        // 3. 待办创建流程
         const drafts = parseTodoDrafts(text, {
           timeZone: config.timezone,
           now: Date.now(),
           ...(actorOpenId ? { assigneeOpenId: actorOpenId } : {}),
         });
+
+        // 强信号校验：parser 解析不出有效待办时不强制创建
+        if (drafts.length === 0 || (drafts.length === 1 && drafts[0]!.title.trim().length < 2)) {
+          console.log(`[router] no valid todo drafts, fallback to chat`);
+          await handleChat(text, message.message_id, actorOpenId);
+          return;
+        }
 
         const chatHistory = actorOpenId ? await client.getChatHistory(actorOpenId, config.chatMemoryLength) : [];
 

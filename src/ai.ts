@@ -70,8 +70,23 @@ export interface TodoConfirmSummary {
   items: TodoParseItem[];
 }
 
+export type IntentType =
+  | "todo_create"     // 明确要创建待办
+  | "todo_query"      // 查询待办列表
+  | "todo_complete"   // 完成待办
+  | "cli_calendar"
+  | "cli_contact"
+  | "cli_docs"
+  | "cli_approval"
+  | "cli_task"
+  | "cli_message"
+  | "chat"            // 闲聊/问答
+  | "unknown"         // 不确定
+  // 兼容旧版本
+  | "todo";
+
 export interface IntentAnalysisResult {
-  type: "todo" | "cli_calendar" | "cli_contact" | "cli_docs" | "cli_approval" | "cli_task" | "cli_message" | "chat";
+  type: IntentType;
   confidence: number;
   action?: string;
   params?: Record<string, any>;
@@ -98,75 +113,157 @@ export class AIClient {
    * 分析用户意图
    */
   async analyzeIntent(userInput: string): Promise<IntentAnalysisResult> {
-    if (!this.provider || !this.config.enableSmartAssistant) {
-      // 默认当作待办处理
-      return { type: "todo", confidence: 0.5 };
+    if (!this.provider) {
+      // 没有 AI 时，默认作为不确定意图（不再粗暴当作待办）
+      return { type: "unknown", confidence: 0.3 };
     }
 
     try {
-      const prompt = `分析用户输入，判断用户想要执行什么操作。
+      const prompt = `判断用户输入属于哪种意图，只返回 JSON。
 
-【操作类型】
-1. todo - 创建/管理待办事项
-   关键词：待办、任务、提醒、完成、截止
-   
-2. cli_calendar - 日历操作
-   关键词：日程、会议、日历、安排、预约
-   
-3. cli_contact - 联系人操作
-   关键词：联系人、找人、搜索、电话、邮箱
-   
-4. cli_docs - 文档操作
-   关键词：文档、创建文档、查找文档、分享
-   
-5. cli_approval - 审批操作
-   关键词：审批、待审批、批准、拒绝
-   
-6. cli_task - 任务管理（飞书任务）
-   关键词：飞书任务、任务列表
-   
-7. cli_message - 发送消息
-   关键词：发消息、通知、告诉
-   
-8. chat - 普通对话
-   关键词：问候、闲聊、询问
+【意图类型】
+1. todo_create - 明确要创建待办（必须有"动作+时间"或明确的任务关键词）
+   ✅ "明天3点提交周报"
+   ✅ "提醒我下午开会"
+   ✅ "记一下：买牛奶"
+   ❌ "最近代办" → todo_query
+   ❌ "你好" → chat
 
-【判断规则】
-- 如果明确提到时间+事项，优先判断为todo
-- 如果提到"查看日程"、"有什么会议"，判断为cli_calendar
-- 如果提到"找某人"、"联系方式"，判断为cli_contact
-- 如果提到"创建文档"、"查找文档"，判断为cli_docs
-- 如果提到"审批"、"待审批"，判断为cli_approval
+2. todo_query - 查询/查看待办
+   ✅ "最近代办有什么"
+   ✅ "我有什么任务"
+   ✅ "查看待办"
+   ✅ "今天要做什么"
 
-返回JSON格式：
+3. todo_complete - 完成某个待办
+   ✅ "我完成了周报"
+   ✅ "把买菜标记完成"
+
+4. cli_calendar - 日历日程（不是待办）
+   ✅ "明天有什么会议"
+   ✅ "查看日程"
+
+5. cli_contact - 找联系人
+   ✅ "找张三"
+   ✅ "张三的电话"
+
+6. cli_docs - 文档相关
+   ✅ "查找项目方案"
+   ✅ "创建会议纪要"
+
+7. cli_approval - 审批
+   ✅ "我有什么待审批"
+
+8. chat - 闲聊/问答/求助（不是任务，不是查询）
+   ✅ "你好"
+   ✅ "今天天气怎么样"
+   ✅ "帮我想想周报怎么写"
+   ✅ "谢谢"
+   ✅ "你是谁"
+
+9. unknown - 完全无法判断
+
+【关键判断规则】
+- "代办/待办" + "有什么/查看/最近/我的" → todo_query（不是 todo_create！）
+- "提醒/记下/创建" + 任务内容 → todo_create
+- 时间(明天/今天/几点) + 动作(开会/提交/完成) → todo_create
+- 单纯的问候、感谢、问问题 → chat
+- 模糊不清楚 → unknown
+
+返回 JSON 格式：
 {
-  "type": "操作类型",
+  "type": "意图类型",
   "confidence": 0.9,
-  "action": "具体动作(如: view_agenda, search_user, create_doc)",
-  "params": { "提取的参数" },
-  "requiresConfirmation": false,
-  "description": "操作描述"
+  "action": "可选的具体动作",
+  "params": { "可选参数，如 query: '搜索词'" },
+  "description": "简短的操作描述"
 }
 
 用户输入：${userInput}`;
 
       const content = await this.provider.chat({
         messages: [
-          { role: "system", content: "只返回JSON，不要其他文本。" },
+          { role: "system", content: "只返回 JSON 对象，不要任何其他文本，不要 markdown 代码块。" },
           { role: "user", content: prompt },
         ],
         temperature: 0,
       });
 
       if (!content) {
-        return { type: "todo", confidence: 0.5 };
+        return { type: "unknown", confidence: 0.3 };
       }
 
-      const result = JSON.parse(content) as IntentAnalysisResult;
+      // 容错解析：去除可能的 markdown 代码块
+      const cleaned = content.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '');
+      const result = JSON.parse(cleaned) as IntentAnalysisResult;
+      
+      // 兼容旧版本：todo -> todo_create
+      if ((result.type as string) === "todo") {
+        result.type = "todo_create";
+      }
+      
       return result;
     } catch (error) {
       console.error("[ai] Intent analysis failed:", error);
-      return { type: "todo", confidence: 0.5 };
+      return { type: "unknown", confidence: 0.3 };
+    }
+  }
+
+  /**
+   * 智能聊天回答（保持简洁）
+   */
+  async chat(params: {
+    userInput: string;
+    chatHistory?: Array<{ role: string; content: string }>;
+  }): Promise<string | null> {
+    if (!this.provider) {
+      return null;
+    }
+
+    try {
+      type ChatRole = "system" | "user" | "assistant";
+      const normalizeRole = (r: string): ChatRole => 
+        r === "assistant" ? "assistant" : r === "system" ? "system" : "user";
+
+      const messages: Array<{ role: ChatRole; content: string }> = [
+        {
+          role: "system",
+          content: `你是一个飞书智能助手"小助"，主要职责是帮用户管理待办事项。
+          
+回答规则：
+1. 简洁！用 1-3 句话回答，最多 80 字
+2. 不使用 markdown 排版（不要 **加粗**、列表、标题）
+3. 友好但不啰嗦，像朋友间聊天
+4. 如果用户问"你能做什么"，简单介绍：管理待办、查日程、找联系人、查文档、查审批
+5. 如果是闲聊问候，简短回复即可
+6. 不要主动建议用户用什么命令，除非他问
+
+不允许的回答：
+- 不要长篇大论
+- 不要列1234的列表
+- 不要"亲爱的用户"等客套话
+- 不要重复用户的问题`,
+        },
+        ...(params.chatHistory || []).slice(-4).map(m => ({
+          role: normalizeRole(m.role),
+          content: m.content,
+        })),
+        { role: "user", content: params.userInput },
+      ];
+
+      const content = await this.provider.chat({
+        messages,
+        temperature: 0.7,
+      });
+
+      if (!content) return null;
+      
+      // 强制限制长度，最多 150 字
+      const trimmed = content.trim();
+      return trimmed.length > 150 ? trimmed.substring(0, 150) + "…" : trimmed;
+    } catch (error) {
+      console.error("[ai] Chat failed:", error);
+      return null;
     }
   }
 
