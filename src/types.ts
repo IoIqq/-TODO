@@ -5,10 +5,12 @@ export interface ParsedDue {
   is_all_day: boolean;
 }
 
-export interface ParsedTask {
+export interface TodoDraft {
   title: string;
   due?: ParsedDue;
   priority: TaskPriority;
+  risk?: "high" | "medium" | "low";
+  assigneeOpenId?: string;
   notes?: string;
   fallbackUsed: boolean;
 }
@@ -59,37 +61,50 @@ export interface FeishuCardActionEvent {
   };
 }
 
-export interface TaskDue {
-  timestamp: string;
-  is_all_day: boolean;
-}
-
-export interface TaskMember {
-  id: string;
-  type: "user" | "app" | "chat";
-  role: "assignee" | "follower";
-  name?: string;
-}
-
-export interface TaskListRef {
-  guid: string;
-}
-
-export interface FeishuTask {
-  guid: string;
-  summary: string;
-  description?: string;
-  due?: TaskDue;
-  completed_at?: string;
-}
-
-export interface FeishuTaskListItem extends FeishuTask {
-  created_at?: string;
-  updated_at?: string;
-}
-
 export interface FeishuApiResponse<T> {
   code: number;
   msg: string;
   data?: T;
+}
+
+export interface FeishuBaseField {
+  id: string;
+  name: string;
+  type: string;
+}
+
+export interface FeishuBaseView {
+  id: string;
+  name: string;
+  type: string;
+}
+
+export interface FeishuBaseTable {
+  id: string;
+  name: string;
+  default_view_id?: string;
+}
+
+export interface FeishuBaseMeta {
+  app: {
+    token: string;
+    name?: string;
+  };
+  table: {
+    id: string;
+    name: string;
+  };
+  fields: FeishuBaseField[];
+  views?: FeishuBaseView[];
+  table_list?: FeishuBaseTable[];
+}
+
+export interface FeishuBaseRecord {
+  record_id: string;
+  fields: Record<string, unknown>;
+}
+
+export interface TodoRecordCreateResult {
+  recordId: string;
+  fields: Record<string, unknown>;
 }

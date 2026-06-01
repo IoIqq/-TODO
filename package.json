@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "tsx watch src/index.ts",
-    "start:prod": "npm run build && node dist/index.js",
-    "start": "node dist/index.js",
+    "dev": "tsx watch --env-file=.env src/index.ts",
+    "start:prod": "npm run build && node --env-file=.env dist/index.js",
+    "start": "node --env-file=.env dist/index.js",
     "test": "node --import tsx --test test/*.test.ts",
     "check": "node check-config.js"
   },

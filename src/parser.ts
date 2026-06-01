@@ -1,11 +1,13 @@
 import { formatDateKey, formatDateTime, getZonedParts, utcMidnightForDate, zonedDateTimeToUtcMs } from "./time.js";
-import type { ParsedTask, TaskPriority } from "./types.js";
+import type { TaskPriority, TodoDraft } from "./types.js";
 
 const PRIORITY_PATTERNS: Array<{ priority: TaskPriority; patterns: RegExp[] }> = [
-  { priority: "high", patterns: [/\bp1\b/gi, /紧急/g, /高优先级/g, /高优先/g] },
-  { priority: "medium", patterns: [/\bp2\b/gi, /中优先级/g, /中优先/g, /普通/g, /一般/g] },
-  { priority: "low", patterns: [/\bp3\b/gi, /低优先级/g, /低优先/g, /稍后/g] },
+  { priority: "high", patterns: [/\bp1\b/gi, /紧急/g, /高优先级/g, /高优/g] },
+  { priority: "medium", patterns: [/\bp2\b/gi, /中优先级/g, /中优/g, /普通/g, /一般/g] },
+  { priority: "low", patterns: [/\bp3\b/gi, /低优先级/g, /低优/g, /稍后/g] },
 ];
+
+const ITEM_SPLIT_PATTERNS = [/\n+/, /；/g, /;+/g, /，然后/g, /以及/g, /\s+和\s+/g];
 
 const WEEKDAY_MAP: Record<string, number> = {
   一: 1,
@@ -20,6 +22,19 @@ const WEEKDAY_MAP: Record<string, number> = {
 
 function cleanWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function splitItems(text: string): string[] {
+  const segments = [text];
+  for (const pattern of ITEM_SPLIT_PATTERNS) {
+    const next: string[] = [];
+    for (const segment of segments) {
+      next.push(...segment.split(pattern));
+    }
+    segments.splice(0, segments.length, ...next);
+  }
+
+  return segments.map(cleanWhitespace).filter(Boolean);
 }
 
 function detectPriority(text: string): { priority: TaskPriority; cleaned: string; ambiguous: boolean } {
@@ -46,12 +61,12 @@ function normalizeWeekdayToken(token: string): number | null {
 }
 
 function parseAbsoluteDate(text: string): { match: RegExpMatchArray | null; year: number; month: number; day: number } {
-  const full = text.match(/(20\d{2})[年\-/.](\d{1,2})[月\-/.](\d{1,2})日?/);
+  const full = text.match(/(20\d{2})[年\/.-](\d{1,2})[月\/.-](\d{1,2})日?/);
   if (full) {
     return { match: full, year: Number(full[1]), month: Number(full[2]), day: Number(full[3]) };
   }
 
-  const short = text.match(/(\d{1,2})[月\-/.](\d{1,2})日?/);
+  const short = text.match(/(\d{1,2})[月\/.-](\d{1,2})日?/);
   if (short) {
     return { match: short, year: new Date().getFullYear(), month: Number(short[1]), day: Number(short[2]) };
   }
@@ -249,17 +264,18 @@ function removeTemporalTokens(text: string, nowTimestamp: number, timeZone: stri
   return { cleaned: cleanWhitespace(cleaned) };
 }
 
-export function parseTaskText(text: string, options: { now?: number; timeZone: string }): ParsedTask {
+function parseOneTodo(text: string, options: { now: number; timeZone: string; assigneeOpenId?: string }): TodoDraft {
   const normalized = cleanWhitespace(text);
   const priorityResult = detectPriority(normalized);
   const noteResult = extractNotes(priorityResult.cleaned);
-  const temporalResult = removeTemporalTokens(noteResult.titleish, options.now ?? Date.now(), options.timeZone);
+  const temporalResult = removeTemporalTokens(noteResult.titleish, options.now, options.timeZone);
   const title = cleanWhitespace(temporalResult.cleaned || noteResult.titleish).replace(/\s*(待办|todo|任务)\s*$/i, "").trim();
 
-  const result: ParsedTask = {
+  const result: TodoDraft = {
     title: title || normalized,
     priority: priorityResult.priority,
     fallbackUsed: priorityResult.ambiguous || !title || !temporalResult.due,
+    ...(options.assigneeOpenId ? { assigneeOpenId: options.assigneeOpenId } : {}),
   };
 
   if (temporalResult.due) {
@@ -272,7 +288,13 @@ export function parseTaskText(text: string, options: { now?: number; timeZone: s
   return result;
 }
 
-export function formatParsedTaskSummary(task: ParsedTask, timeZone: string): string {
+export function parseTodoDrafts(text: string, options: { now?: number; timeZone: string; assigneeOpenId?: string }): TodoDraft[] {
+  const now = options.now ?? Date.now();
+  const extra = options.assigneeOpenId ? { assigneeOpenId: options.assigneeOpenId } : {};
+  return splitItems(text).map((item) => parseOneTodo(item, { now, timeZone: options.timeZone, ...extra }));
+}
+
+export function formatTodoDraftSummary(task: TodoDraft, timeZone: string): string {
   const lines = [`标题：${task.title}`, `优先级：${task.priority}`];
   if (task.due) {
     const ts = Number(task.due.timestamp);
@@ -283,4 +305,8 @@ export function formatParsedTaskSummary(task: ParsedTask, timeZone: string): str
     lines.push(`备注：${task.notes}`);
   }
   return lines.join("\n");
+}
+
+export function hasAmbiguousFields(drafts: TodoDraft[]): boolean {
+  return drafts.some((draft) => draft.fallbackUsed);
 }
