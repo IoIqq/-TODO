@@ -115,20 +115,66 @@ export class FeishuClient {
     return payload.data?.items ?? [];
   }
 
-  async createTodoRecordsOneByOne(params: { items: TodoParseItem[] }): Promise<TodoRecordCreateResult[]> {
-    const results: TodoRecordCreateResult[] = [];
-    for (const item of params.items) {
+  /**
+   * 创建一条记录，遇到字段不存在错误时自动剔除该字段重试
+   */
+  private async createOneRecord(fields: Record<string, unknown>): Promise<FeishuBaseRecord> {
+    let currentFields = { ...fields };
+    const maxAttempts = 6;
+    
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const payload = await this.authedRequest<FeishuApiResponse<{ record?: FeishuBaseRecord }>>(
         `/bitable/v1/apps/${encodeURIComponent(this.config.feishuBaseToken)}/tables/${encodeURIComponent(this.config.feishuBaseTableId)}/records?user_id_type=open_id`,
         {
           method: "POST",
-          body: JSON.stringify({ fields: toBaseRecordFields(item) }),
+          body: JSON.stringify({ fields: currentFields }),
         },
       );
-      if (payload.code !== 0 || !payload.data?.record) {
-        throw new Error(`Create base record failed: ${payload.msg}`);
+      
+      if (payload.code === 0 && payload.data?.record) {
+        return payload.data.record;
       }
-      results.push({ recordId: payload.data.record.record_id, fields: payload.data.record.fields });
+      
+      // 处理字段不存在错误（飞书错误码 1254017 / 1254045）
+      const errMsg = payload.msg || "";
+      const fieldNotFoundMatch = errMsg.match(/FieldNameNotFound|field.*not.*exist|不存在|invalid.*field/i);
+      
+      if (fieldNotFoundMatch) {
+        // 尝试从错误信息中提取字段名
+        const fieldNameMatch = errMsg.match(/[""'`]([^""'`]+)[""'`]/);
+        const fieldToRemove = fieldNameMatch?.[1];
+        
+        if (fieldToRemove && currentFields[fieldToRemove] !== undefined) {
+          console.warn(`[feishu] Field "${fieldToRemove}" not found in table, removing and retrying...`);
+          delete currentFields[fieldToRemove];
+          continue;
+        }
+        
+        // 没有匹配到具体字段名，按优先级剔除可选字段
+        const optionalFields = ["AI 特办事项风险总", "备注", "创建时间", "执行人"];
+        let removed = false;
+        for (const f of optionalFields) {
+          if (currentFields[f] !== undefined) {
+            console.warn(`[feishu] Removing optional field "${f}" and retrying...`);
+            delete currentFields[f];
+            removed = true;
+            break;
+          }
+        }
+        if (removed) continue;
+      }
+      
+      throw new Error(`Create base record failed: ${payload.msg}`);
+    }
+    
+    throw new Error("Create base record failed: max retry attempts exceeded");
+  }
+
+  async createTodoRecordsOneByOne(params: { items: TodoParseItem[] }): Promise<TodoRecordCreateResult[]> {
+    const results: TodoRecordCreateResult[] = [];
+    for (const item of params.items) {
+      const record = await this.createOneRecord(toBaseRecordFields(item));
+      results.push({ recordId: record.record_id, fields: record.fields });
     }
     return results;
   }

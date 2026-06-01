@@ -666,9 +666,15 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
         }
       } catch (error) {
         const messageText = error instanceof Error ? error.message : String(error);
+        const stack = error instanceof Error ? error.stack : "";
         console.error(`[feishu] message handling failed for ${message.message_id}: ${messageText}`);
+        if (stack) {
+          console.error(`[feishu] stack trace:\n${stack}`);
+        }
         try {
-          await client.replyText(message.message_id, "我收到了，但刚才整理待办时出错了，请再发一次试试。");
+          // 在开发环境给用户更明确的错误提示
+          const userMsg = `❌ 处理消息时出错：${messageText.substring(0, 200)}\n\n请稍后重试或联系管理员`;
+          await client.replyText(message.message_id, userMsg);
         } catch (replyError) {
           console.error(
             `[feishu] fallback reply failed for ${message.message_id}: ${replyError instanceof Error ? replyError.message : String(replyError)}`,
