@@ -192,6 +192,63 @@ export class FeishuClient {
     }
   }
 
+  /**
+   * 主动发送消息（不依赖 reply）
+   * @param receiveIdType  open_id / user_id / union_id / chat_id / email
+   */
+  async sendMessage(params: {
+    receiveId: string;
+    receiveIdType?: "open_id" | "user_id" | "union_id" | "chat_id" | "email";
+    msgType: "text" | "interactive";
+    content: Record<string, unknown> | string;
+  }): Promise<{ messageId?: string }> {
+    const idType = params.receiveIdType ?? "open_id";
+    const contentStr =
+      typeof params.content === "string" ? params.content : JSON.stringify(params.content);
+
+    const payload = await this.authedRequest<FeishuApiResponse<{ message_id?: string }>>(
+      `/im/v1/messages?receive_id_type=${idType}`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          receive_id: params.receiveId,
+          msg_type: params.msgType,
+          content: contentStr,
+        }),
+      },
+    );
+
+    if (payload.code !== 0) {
+      throw new Error(`Send message failed: ${payload.msg}`);
+    }
+    const messageId = payload.data?.message_id;
+    return messageId ? { messageId } : {};
+  }
+
+  /**
+   * 主动给单个用户发文本
+   */
+  async sendTextToUser(openId: string, text: string): Promise<void> {
+    await this.sendMessage({
+      receiveId: openId,
+      receiveIdType: "open_id",
+      msgType: "text",
+      content: { text },
+    });
+  }
+
+  /**
+   * 主动给单个用户发交互卡片
+   */
+  async sendCardToUser(openId: string, card: Record<string, unknown>): Promise<void> {
+    await this.sendMessage({
+      receiveId: openId,
+      receiveIdType: "open_id",
+      msgType: "interactive",
+      content: card,
+    });
+  }
+
   async replyCard(messageId: string, card: Record<string, unknown>): Promise<void> {
     const payload = await this.authedRequest<FeishuApiResponse<{ message_id: string }>>(`/im/v1/messages/${encodeURIComponent(messageId)}/reply`, {
       method: "POST",
