@@ -1,5 +1,6 @@
 import type { TodoConfirmSummary, TodoParseItem } from "./ai.js";
 import { formatDateTime } from "./time.js";
+import { formatShortDateTime, classifyDue } from "./scheduler/time-utils.js";
 
 function escapeText(text: string): string {
   return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -212,6 +213,153 @@ export function buildCLIResultCard(params: {
       title: {
         tag: "plain_text",
         content: params.success ? "操作成功" : "操作失败",
+      },
+    },
+    elements,
+  };
+}
+
+/**
+ * 每日提醒卡片：早晚汇总用
+ */
+export interface ReminderTodoItem {
+  recordId: string;
+  title: string;
+  priority: string;
+  dueTimestamp?: number;
+}
+
+export function buildDailyReminderCard(params: {
+  slot: "morning" | "evening";
+  todayYmd: string;
+  todos: ReminderTodoItem[];
+  timezone: string;
+}): Record<string, unknown> {
+  const { slot, todos, timezone } = params;
+
+  // 分类
+  const overdue: ReminderTodoItem[] = [];
+  const today: ReminderTodoItem[] = [];
+  const future: ReminderTodoItem[] = [];
+  const noDue: ReminderTodoItem[] = [];
+
+  for (const t of todos) {
+    if (t.dueTimestamp === undefined) {
+      noDue.push(t);
+      continue;
+    }
+    const cls = classifyDue(t.dueTimestamp, timezone);
+    if (cls === "overdue") overdue.push(t);
+    else if (cls === "today") today.push(t);
+    else future.push(t);
+  }
+
+  const slotIcon = slot === "morning" ? "☀️" : "🌙";
+  const slotGreeting = slot === "morning" ? "早安" : "晚安";
+  const headerColor = overdue.length > 0 ? "red" : slot === "morning" ? "blue" : "purple";
+
+  const elements: Array<Record<string, unknown>> = [];
+
+  // 概况
+  const summaryParts: string[] = [];
+  if (overdue.length > 0) summaryParts.push(`⚠️ 逾期 ${overdue.length} 条`);
+  if (today.length > 0) summaryParts.push(`📌 今日 ${today.length} 条`);
+  if (future.length > 0) summaryParts.push(`📅 后续 ${future.length} 条`);
+  if (noDue.length > 0) summaryParts.push(`📝 无截止 ${noDue.length} 条`);
+
+  elements.push({
+    tag: "div",
+    text: {
+      tag: "lark_md",
+      content: summaryParts.length > 0
+        ? summaryParts.join(" · ")
+        : "暂无未完成待办，加油 💪",
+    },
+  });
+
+  if (todos.length === 0) {
+    return {
+      config: { wide_screen_mode: true, enable_forward: true },
+      header: {
+        template: "green",
+        title: {
+          tag: "plain_text",
+          content: `${slotIcon} ${slotGreeting}！今天没有未完成待办`,
+        },
+      },
+      elements,
+    };
+  }
+
+  // 各分组
+  const renderGroup = (label: string, list: ReminderTodoItem[]) => {
+    if (list.length === 0) return;
+    elements.push({ tag: "hr" });
+    elements.push({
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: `**${label}**`,
+      },
+    });
+    for (const t of list.slice(0, 10)) {
+      const priIcon = t.priority.includes("P0") || t.priority.includes("高") ? "🔴"
+        : t.priority.includes("P2") || t.priority.includes("低") ? "🟢"
+        : "🟡";
+      const dueStr = t.dueTimestamp
+        ? formatShortDateTime(t.dueTimestamp, timezone)
+        : "无截止";
+      elements.push({
+        tag: "div",
+        text: {
+          tag: "lark_md",
+          content: `${priIcon} ${escapeText(t.title)}  ·  ${escapeText(dueStr)}`,
+        },
+      });
+      elements.push({
+        tag: "action",
+        actions: [
+          {
+            tag: "button",
+            type: "primary",
+            text: { tag: "plain_text", content: "✅ 完成" },
+            value: { action: "complete_task", record_id: t.recordId },
+          },
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "⏰ 延期" },
+            value: {
+              action: "postpone_task",
+              record_id: t.recordId,
+              ...(t.dueTimestamp ? { current_due: new Date(t.dueTimestamp).toISOString().split("T")[0] } : {}),
+            },
+          },
+        ],
+      });
+    }
+    if (list.length > 10) {
+      elements.push({
+        tag: "div",
+        text: {
+          tag: "plain_text",
+          content: `…还有 ${list.length - 10} 条未显示`,
+        },
+      });
+    }
+  };
+
+  renderGroup(`⚠️ 逾期（${overdue.length}）`, overdue);
+  renderGroup(`📌 今日截止（${today.length}）`, today);
+  renderGroup(`📅 后续（${future.length}）`, future);
+  renderGroup(`📝 无截止日期（${noDue.length}）`, noDue);
+
+  return {
+    config: { wide_screen_mode: true, enable_forward: true },
+    header: {
+      template: headerColor,
+      title: {
+        tag: "plain_text",
+        content: `${slotIcon} ${slotGreeting}！你有 ${todos.length} 件待办`,
       },
     },
     elements,

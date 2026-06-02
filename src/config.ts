@@ -28,6 +28,12 @@ export interface AppConfig {
   cliTimeout: number;
   cliConfirmActions: string[];
   cliLogEnabled: boolean;
+  // 每日待办提醒（早晚定时推送）
+  enableDailyReminder: boolean;
+  /** 早晨 cron 表达式，默认 "30 8 * * *" 即每天 08:30 */
+  dailyMorningCron: string;
+  /** 晚上 cron 表达式，默认 "30 18 * * *" 即每天 18:30 */
+  dailyEveningCron: string;
 }
 
 function requireEnv(name: string): string {
@@ -67,5 +73,9 @@ export function loadConfig(): AppConfig {
     cliTimeout: Number.parseInt(process.env.CLI_TIMEOUT ?? "30000", 10),
     cliConfirmActions: (process.env.CLI_CONFIRM_ACTIONS?.trim() || "create,update,delete,send,approve").split(",").map(s => s.trim()),
     cliLogEnabled: process.env.CLI_LOG_ENABLED?.toLowerCase() !== "false",
+    // 每日待办提醒（默认开启，08:30 / 18:30）
+    enableDailyReminder: process.env.ENABLE_DAILY_REMINDER?.toLowerCase() !== "false",
+    dailyMorningCron: process.env.DAILY_MORNING_CRON?.trim() || "30 8 * * *",
+    dailyEveningCron: process.env.DAILY_EVENING_CRON?.trim() || "30 18 * * *",
   };
 }

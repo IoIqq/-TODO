@@ -2,6 +2,8 @@ import http from "node:http";
 import { loadConfig } from "./config.js";
 import { createTodoBotApp } from "./app.js";
 import { initDatabase, closeDatabase } from "./storage/index.js";
+import { DailyReminderScheduler } from "./scheduler/daily-reminder.js";
+import { FeishuClient } from "./feishu.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -10,9 +12,22 @@ async function main(): Promise<void> {
   const dataDir = process.env.DATA_DIR?.trim() || "./data";
   initDatabase(dataDir);
 
-  // 优雅关闭数据库
+  // 启动每日定时提醒（08:30 / 18:30）
+  const reminderClient = new FeishuClient(config);
+  const reminderScheduler = new DailyReminderScheduler({
+    config,
+    feishuClient: reminderClient,
+  });
+  reminderScheduler.start();
+
+  // 优雅关闭：先停 cron，再关数据库
   const shutdown = (signal: string) => {
     console.log(`\n[server] Received ${signal}, shutting down...`);
+    try {
+      reminderScheduler.stop();
+    } catch (error) {
+      console.error("[server] Error stopping scheduler:", error);
+    }
     try {
       closeDatabase();
     } catch (error) {
@@ -23,7 +38,7 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-  const app = createTodoBotApp(config);
+  const app = createTodoBotApp(config, { reminderScheduler });
 
   const server = http.createServer(async (req, res) => {
     if (!req.url || !req.method) {

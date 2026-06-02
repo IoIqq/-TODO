@@ -16,9 +16,11 @@ import {
 import { OperationHistory } from "./history/operation-history.js";
 import { Agent } from "./agent/agent.js";
 import { ConversationStore } from "./storage/index.js";
+import type { DailyReminderScheduler } from "./scheduler/daily-reminder.js";
 
 export interface TodoBotDependencies {
   fetchImpl?: typeof fetch;
+  reminderScheduler?: DailyReminderScheduler;
 }
 
 export interface TodoBotApp {
@@ -879,6 +881,18 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
       return textResponse("ok");
+    }
+
+    // 调试：手动触发一次提醒
+    // GET /admin/test-reminder?slot=morning|evening
+    if (request.method === "GET" && url.pathname === "/admin/test-reminder") {
+      if (!deps.reminderScheduler) {
+        return jsonResponse({ ok: false, error: "reminderScheduler not configured" }, 400);
+      }
+      const slotParam = url.searchParams.get("slot");
+      const slot = slotParam === "evening" ? "evening" : "morning";
+      const result = await deps.reminderScheduler.runOnce(slot);
+      return jsonResponse({ ok: true, slot, ...result });
     }
 
     if (request.method !== "POST") {
