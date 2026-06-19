@@ -1,23 +1,24 @@
 @echo off
 chcp 65001 >nul
-cd /d "%~dp0"
-title Stop Feishu Todo Bot
+title Feishu Todo Bot - Stopper
 
-echo Stopping Feishu Todo Bot (port 17234)...
+set PORT=17234
+
+echo ============================================================
+echo   Stopping Feishu Todo Bot
+echo ============================================================
 echo.
 
-set FOUND=0
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":17234.*LISTENING"') do (
-    echo Killing PID %%a
+echo [1/2] Killing Node process on port %PORT%...
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":%PORT%.*LISTENING"') do (
+    echo       Killing Node PID %%a
     taskkill /F /PID %%a >nul 2>&1
-    set FOUND=1
 )
 
-if "%FOUND%"=="0" (
-    echo No process found on port 17234
-) else (
-    echo Service stopped successfully
-)
+echo [2/2] Killing cloudflared processes...
+taskkill /F /IM cloudflared-windows-amd64.exe >nul 2>&1
+taskkill /F /IM cloudflared.exe >nul 2>&1
 
 echo.
-pause
+echo Done. Press any key to exit.
+pause >nul

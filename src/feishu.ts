@@ -9,6 +9,7 @@ import type {
 } from "./types.js";
 import { buildTodoConfirmCard } from "./cards.js";
 import { type TodoConfirmSummary, type TodoParseItem, toBaseRecordFields } from "./ai.js";
+import { cancelReminders, scheduleRecordReminders, scheduleReminders } from "./storage/index.js";
 
 export interface FeishuClientOptions {
   fetchImpl?: typeof fetch;
@@ -29,18 +30,34 @@ export class FeishuClient {
   }
 
   private async requestJson<T>(input: RequestInfo | URL, init: RequestInit): Promise<T> {
-    const response = await this.fetchImpl(input, init);
-    const raw = await response.text();
+    let lastError: Error | null = null;
 
-    if (!response.ok) {
-      throw new Error(`Feishu API HTTP ${response.status}${raw ? ": " + raw : ""}`);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const response = await this.fetchImpl(input, init);
+        const raw = await response.text();
+
+        if (!response.ok) {
+          const error = new Error(`Feishu API HTTP ${response.status}${raw ? ": " + raw : ""}`);
+          if (response.status === 429 || response.status >= 500) {
+            lastError = error;
+            if (attempt < 2) continue;
+          }
+          throw error;
+        }
+
+        try {
+          return JSON.parse(raw) as T;
+        } catch {
+          throw new Error(`Feishu API returned non-JSON payload${raw ? ": " + raw.slice(0, 500) : ""}`);
+        }
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt >= 2) break;
+      }
     }
 
-    try {
-      return JSON.parse(raw) as T;
-    } catch {
-      throw new Error(`Feishu API returned non-JSON payload${raw ? ": " + raw.slice(0, 500) : ""}`);
-    }
+    throw lastError ?? new Error("Feishu API request failed");
   }
 
   async getTenantAccessToken(): Promise<string> {
@@ -83,14 +100,26 @@ export class FeishuClient {
 
   private async authedRequest<T>(path: string, init: RequestInit): Promise<T> {
     const token = await this.getTenantAccessToken();
-    return this.requestJson<T>(`https://open.feishu.cn/open-apis${path}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json; charset=utf-8",
-        ...(init.headers ?? {}),
-      },
-    });
+    let lastPayload: T | null = null;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const payload = await this.requestJson<T>(`https://open.feishu.cn/open-apis${path}`, {
+        ...init,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json; charset=utf-8",
+          ...(init.headers ?? {}),
+        },
+      });
+      lastPayload = payload;
+      const code = typeof (payload as { code?: unknown }).code === "number" ? (payload as { code: number }).code : 0;
+      const retryableCode = code === 99991400 || code === 99991663 || code >= 5000000;
+      if (!retryableCode || attempt >= 2) {
+        return payload;
+      }
+    }
+
+    return lastPayload as T;
   }
 
   async getBaseMeta(): Promise<FeishuBaseMeta> {
@@ -174,9 +203,81 @@ export class FeishuClient {
     const results: TodoRecordCreateResult[] = [];
     for (const item of params.items) {
       const record = await this.createOneRecord(toBaseRecordFields(item));
+      this.scheduleDeadlineReminder(record.record_id, item);
       results.push({ recordId: record.record_id, fields: record.fields });
     }
     return results;
+  }
+
+  private scheduleDeadlineReminder(recordId: string, item: TodoParseItem): void {
+    if (!item.assigneeOpenId || (!item.due && !item.start)) return;
+    const dueTimestamp = item.due ? normalizeTimestamp(item.due.timestamp) : null;
+    const startTimestamp = item.start ? normalizeTimestamp(item.start.timestamp) : null;
+    if (dueTimestamp === null && startTimestamp === null) return;
+
+    try {
+      scheduleReminders({
+        recordId,
+        title: item.title,
+        priority: item.priority,
+        ...(dueTimestamp === null ? {} : { dueTimestamp }),
+        ...(startTimestamp === null ? {} : { startTimestamp }),
+        assigneeOpenId: item.assigneeOpenId,
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`[deadline] schedule reminder failed for ${recordId}: ${msg}`);
+    }
+  }
+
+  private cancelDeadlineReminders(recordId: string): void {
+    try {
+      cancelReminders(recordId);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`[deadline] cancel reminder failed for ${recordId}: ${msg}`);
+    }
+  }
+
+  private scheduleDeadlineReminderFromRecord(record: FeishuBaseRecord, dueTimestamp: number | null, fallback?: { title?: string; priority?: string; assigneeOpenId?: string; startTimestamp?: number }): void {
+    const assigneeOpenIds = extractOpenIds(record.fields["执行人"]);
+    if (assigneeOpenIds.length === 0 && fallback?.assigneeOpenId) {
+      assigneeOpenIds.push(fallback.assigneeOpenId);
+    }
+    if (assigneeOpenIds.length === 0) {
+      this.cancelDeadlineReminders(record.record_id);
+      return;
+    }
+
+    const startTimestamp = normalizeTimestamp(record.fields["开始时间"]) ?? fallback?.startTimestamp ?? null;
+    if (dueTimestamp === null && startTimestamp === null) {
+      this.cancelDeadlineReminders(record.record_id);
+      return;
+    }
+
+    try {
+      scheduleRecordReminders({
+        recordId: record.record_id,
+        title: String(record.fields["待办事项"] || fallback?.title || "未命名任务"),
+        priority: String(record.fields["优先级"] || fallback?.priority || "普通"),
+        ...(dueTimestamp === null ? {} : { dueTimestamp }),
+        ...(startTimestamp === null ? {} : { startTimestamp }),
+        assigneeOpenIds,
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`[deadline] reschedule reminder failed for ${record.record_id}: ${msg}`);
+    }
+  }
+
+  private runCardAction(actionName: string, action: () => Promise<void>): void {
+    void (async () => {
+      try {
+        await action();
+      } catch (error) {
+        console.error(`${actionName} failed`, error);
+      }
+    })();
   }
 
   async replyText(messageId: string, text: string): Promise<void> {
@@ -317,45 +418,47 @@ export class FeishuClient {
 
     // 完成任务
     if (action === "complete_task" && recordId) {
-      try {
-        await this.deleteRecord(recordId);
-        return { toast: { type: "success", content: "✅ 已完成" } };
-      } catch (error) {
-        console.error("Complete task failed", error);
-        return { toast: { type: "error", content: "操作失败" } };
-      }
+      this.runCardAction("Complete task", async () => {
+        await this.updateRecord(recordId, { 是否已完成: true });
+        this.cancelDeadlineReminders(recordId);
+      });
+      return { toast: { type: "success", content: "✅ 已开始完成" } };
     }
 
     // 延期任务
     if (action === "postpone_task" && recordId) {
-      try {
-        const currentDue = typeof value?.current_due === "string" ? value.current_due : undefined;
-        if (!currentDue) {
-          return { toast: { type: "warning", content: "该任务没有截止时间，无法延期" } };
-        }
-
-        // 简单延期：在当前日期字符串上加一天
-        const date = new Date(currentDue);
-        date.setDate(date.getDate() + 1);
-        const newDue = date.toISOString().split("T")[0];
-
-        await this.updateRecord(recordId, { "截止日期": newDue });
-        return { toast: { type: "info", content: `⏰ 已延期到 ${newDue}` } };
-      } catch (error) {
-        console.error("Postpone task failed", error);
-        return { toast: { type: "error", content: "延期失败" } };
+      const currentDueTimestamp = normalizeTimestamp(value?.current_due_timestamp ?? value?.current_due);
+      if (currentDueTimestamp === null) {
+        return { toast: { type: "warning", content: "该任务没有截止时间，无法延期" } };
       }
+
+      const deferMsRaw = typeof value?.defer_ms === "number" ? value.defer_ms : Number(value?.defer_ms ?? 24 * 60 * 60 * 1000);
+      const deferMs = deferMsRaw === 30 * 60 * 1000 || deferMsRaw === 24 * 60 * 60 * 1000
+        ? deferMsRaw
+        : 24 * 60 * 60 * 1000;
+      const newDueTimestamp = currentDueTimestamp + deferMs;
+      const startTimestamp = normalizeTimestamp(value?.start_timestamp);
+      const fallbackAssignee = typeof value?.assignee_open_id === "string" ? value.assignee_open_id : undefined;
+      this.runCardAction("Postpone task", async () => {
+        const updated = await this.updateRecord(recordId, { "截止日期": newDueTimestamp });
+        this.scheduleDeadlineReminderFromRecord(updated, newDueTimestamp, {
+          ...(typeof value?.title === "string" ? { title: value.title } : {}),
+          ...(typeof value?.priority === "string" ? { priority: value.priority } : {}),
+          ...(fallbackAssignee ? { assigneeOpenId: fallbackAssignee } : {}),
+          ...(startTimestamp === null ? {} : { startTimestamp }),
+        });
+      });
+      const deferLabel = deferMs === 30 * 60 * 1000 ? "半小时" : "一天";
+      return { toast: { type: "info", content: `⏰ 已开始延后${deferLabel}，新截止日期 ${formatDateKey(newDueTimestamp, this.config.timezone)}` } };
     }
 
     // 删除任务
     if (action === "delete_task" && recordId) {
-      try {
+      this.runCardAction("Delete task", async () => {
         await this.deleteRecord(recordId);
-        return { toast: { type: "info", content: "🗑️ 已删除" } };
-      } catch (error) {
-        console.error("Delete task failed", error);
-        return { toast: { type: "error", content: "删除失败" } };
-      }
+        this.cancelDeadlineReminders(recordId);
+      });
+      return { toast: { type: "info", content: "🗑️ 已开始删除" } };
     }
 
     return { toast: { type: "warning", content: "未找到待确认内容" } };
@@ -368,21 +471,32 @@ export class FeishuClient {
 
   async listRecords(params?: { pageSize?: number; filter?: string }): Promise<FeishuBaseRecord[]> {
     const pageSize = params?.pageSize ?? 100;
-    let url = `/bitable/v1/apps/${encodeURIComponent(this.config.feishuBaseToken)}/tables/${encodeURIComponent(this.config.feishuBaseTableId)}/records?page_size=${pageSize}&user_id_type=open_id`;
-    
-    if (params?.filter) {
-      url += `&filter=${encodeURIComponent(params.filter)}`;
-    }
+    const records: FeishuBaseRecord[] = [];
+    let pageToken: string | undefined;
 
-    const payload = await this.authedRequest<FeishuApiResponse<{ items?: FeishuBaseRecord[] }>>(url, {
-      method: "GET",
-    });
+    do {
+      let url = `/bitable/v1/apps/${encodeURIComponent(this.config.feishuBaseToken)}/tables/${encodeURIComponent(this.config.feishuBaseTableId)}/records?page_size=${pageSize}&user_id_type=open_id`;
 
-    if (payload.code !== 0) {
-      throw new Error(`List records failed: ${payload.msg}`);
-    }
+      if (params?.filter) {
+        url += `&filter=${encodeURIComponent(params.filter)}`;
+      }
+      if (pageToken) {
+        url += `&page_token=${encodeURIComponent(pageToken)}`;
+      }
 
-    return payload.data?.items ?? [];
+      const payload = await this.authedRequest<FeishuApiResponse<{ items?: FeishuBaseRecord[]; has_more?: boolean; page_token?: string }>>(url, {
+        method: "GET",
+      });
+
+      if (payload.code !== 0) {
+        throw new Error(`List records failed: ${payload.msg}`);
+      }
+
+      records.push(...(payload.data?.items ?? []));
+      pageToken = payload.data?.has_more ? payload.data.page_token : undefined;
+    } while (pageToken);
+
+    return records;
   }
 
   async updateRecord(recordId: string, fields: Record<string, unknown>): Promise<FeishuBaseRecord> {
@@ -476,4 +590,34 @@ export class FeishuClient {
   }
 }
 
+function normalizeTimestamp(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return null;
+
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return numeric;
+
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function extractOpenIds(field: unknown): string[] {
+  if (!Array.isArray(field)) return [];
+  return field
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const record = item as Record<string, unknown>;
+      return typeof record.id === "string" ? record.id : typeof record.open_id === "string" ? record.open_id : null;
+    })
+    .filter((id): id is string => Boolean(id));
+}
+
+function formatDateKey(timestamp: number, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(timestamp));
+}
 

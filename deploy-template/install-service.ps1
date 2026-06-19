@@ -4,11 +4,65 @@
 $serviceName = "FeishuTodoBot"
 $displayName = "FeishuTodoBot"
 $description = "Feishu Todo Bot Service"
+$nodeExe = Get-Command node -ErrorAction SilentlyContinue
+$npmExe = Get-Command npm -ErrorAction SilentlyContinue
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "Install Windows Service" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
+
+function Assert-ToolExists {
+    param(
+        [string]$ToolName,
+        [object]$ToolCommand
+    )
+
+    if (-not $ToolCommand) {
+        Write-Host "[ERROR] $ToolName not found in PATH" -ForegroundColor Red
+        Write-Host "Please install Node.js LTS (includes npm) first." -ForegroundColor Yellow
+        pause
+        exit 1
+    }
+}
+
+Assert-ToolExists -ToolName "node" -ToolCommand $nodeExe
+Assert-ToolExists -ToolName "npm" -ToolCommand $npmExe
+
+Set-Location $PSScriptRoot
+
+# Ensure production dependencies are installed in the deployed directory.
+Write-Host "Checking production dependencies..." -ForegroundColor Yellow
+if (-not (Test-Path "$PSScriptRoot\node_modules\better-sqlite3")) {
+    Write-Host "Installing production dependencies..." -ForegroundColor Yellow
+    npm install --omit=dev
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[ERROR] npm install --omit=dev failed" -ForegroundColor Red
+        Write-Host "Please inspect network access and npm logs, then rerun this script." -ForegroundColor Yellow
+        pause
+        exit 1
+    }
+}
+
+if (-not (Test-Path "$PSScriptRoot\node_modules\better-sqlite3")) {
+    Write-Host "Attempting to rebuild better-sqlite3..." -ForegroundColor Yellow
+    npm rebuild better-sqlite3 --build-from-source
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[ERROR] better-sqlite3 is still missing after rebuild." -ForegroundColor Red
+        Write-Host "On Windows Server, please ensure the Visual Studio Build Tools are installed." -ForegroundColor Yellow
+        pause
+        exit 1
+    }
+}
+
+if (-not (Test-Path "$PSScriptRoot\node_modules\better-sqlite3")) {
+    Write-Host "[ERROR] better-sqlite3 was not installed correctly." -ForegroundColor Red
+    Write-Host "Please run: npm install --omit=dev; npm rebuild better-sqlite3 --build-from-source" -ForegroundColor Yellow
+    pause
+    exit 1
+}
+
+Write-Host "[OK] Production dependencies are ready" -ForegroundColor Green
 
 # Check Administrator privileges
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())

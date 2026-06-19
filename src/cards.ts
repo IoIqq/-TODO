@@ -227,6 +227,8 @@ export interface ReminderTodoItem {
   title: string;
   priority: string;
   dueTimestamp?: number;
+  startTimestamp?: number;
+  assigneeOpenId?: string;
 }
 
 export function buildDailyReminderCard(params: {
@@ -331,7 +333,12 @@ export function buildDailyReminderCard(params: {
             value: {
               action: "postpone_task",
               record_id: t.recordId,
-              ...(t.dueTimestamp ? { current_due: new Date(t.dueTimestamp).toISOString().split("T")[0] } : {}),
+              title: t.title,
+              priority: t.priority,
+              defer_ms: 24 * 60 * 60 * 1000,
+              ...(t.assigneeOpenId ? { assignee_open_id: t.assigneeOpenId } : {}),
+              ...(t.startTimestamp ? { start_timestamp: t.startTimestamp } : {}),
+              ...(t.dueTimestamp ? { current_due_timestamp: t.dueTimestamp } : {}),
             },
           },
         ],
@@ -360,6 +367,106 @@ export function buildDailyReminderCard(params: {
       title: {
         tag: "plain_text",
         content: `${slotIcon} ${slotGreeting}！你有 ${todos.length} 件待办`,
+      },
+    },
+    elements,
+  };
+}
+
+export function buildDeadlineAlertCard(params: {
+  todos: ReminderTodoItem[];
+  urgency: "upcoming" | "start" | "overdue";
+  timezone: string;
+  todayYmd?: string;
+}): Record<string, unknown> {
+  const { todos, urgency, timezone } = params;
+  const isOverdue = urgency === "overdue";
+  const isStart = urgency === "start";
+  const intro = isOverdue
+    ? `⚠️ 有 ${todos.length} 个待办已经逾期，请尽快处理。${params.todayYmd ? `\n今天日期：${escapeText(params.todayYmd)}` : ""}`
+    : isStart
+      ? `▶️ 有 ${todos.length} 个待办到了开始时间。`
+      : `⏰ 有 ${todos.length} 个待办接近截止时间。`;
+  const elements: Array<Record<string, unknown>> = [
+    {
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: intro,
+      },
+    },
+  ];
+
+  for (const t of todos.slice(0, 10)) {
+    const priIcon = t.priority.includes("P0") || t.priority.includes("高") ? "🔴"
+      : t.priority.includes("P2") || t.priority.includes("低") ? "🟢"
+      : "🟡";
+    const dueStr = t.dueTimestamp ? formatShortDateTime(t.dueTimestamp, timezone) : "无截止";
+    const startStr = t.startTimestamp ? formatShortDateTime(t.startTimestamp, timezone) : "未设置";
+    const timeLine = isStart
+      ? `开始：${escapeText(startStr)}\n截止：${escapeText(dueStr)}`
+      : `截止：${escapeText(dueStr)}`;
+    elements.push({ tag: "hr" });
+    elements.push({
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: `${priIcon} **${escapeText(t.title)}**\n${timeLine}`,
+      },
+    });
+    elements.push({
+      tag: "action",
+      actions: [
+        {
+          tag: "button",
+          type: "primary",
+          text: { tag: "plain_text", content: "✅ 完成" },
+          value: { action: "complete_task", record_id: t.recordId },
+        },
+        {
+          tag: "button",
+          text: { tag: "plain_text", content: "⏰ 延后半小时" },
+          value: {
+            action: "postpone_task",
+            record_id: t.recordId,
+            title: t.title,
+            priority: t.priority,
+            defer_ms: 30 * 60 * 1000,
+            ...(t.assigneeOpenId ? { assignee_open_id: t.assigneeOpenId } : {}),
+            ...(t.dueTimestamp ? { current_due_timestamp: t.dueTimestamp } : {}),
+          },
+        },
+        {
+          tag: "button",
+          text: { tag: "plain_text", content: "⏰ 延后一天" },
+          value: {
+            action: "postpone_task",
+            record_id: t.recordId,
+            title: t.title,
+            priority: t.priority,
+            defer_ms: 24 * 60 * 60 * 1000,
+            ...(t.assigneeOpenId ? { assignee_open_id: t.assigneeOpenId } : {}),
+            ...(t.dueTimestamp ? { current_due_timestamp: t.dueTimestamp } : {}),
+          },
+        },
+      ],
+    });
+  }
+
+  if (todos.length > 10) {
+    elements.push({
+      tag: "div",
+      text: { tag: "plain_text", content: `还有 ${todos.length - 10} 条未显示` },
+    });
+  }
+
+  return {
+    config: { wide_screen_mode: true, enable_forward: true },
+    header: {
+      template: isOverdue ? "red" : isStart ? "blue" : "orange",
+      title: {
+        tag: "plain_text",
+        content: isOverdue ? "⚠️ 待办已逾期" : isStart ? "▶️ 待办开始提醒" : "⏰ 待办即将到期",
       },
     },
     elements,

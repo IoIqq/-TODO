@@ -154,30 +154,3 @@ export function formatTaskResult(data: any): string {
   
   return header + lines.join("\n\n") + footer;
 }
-
-/**
- * 通用列表格式化
- * 减少重复代码的辅助函数
- */
-export function formatList(params: {
-  data: any;
-  emptyMessage: string;
-  icon: string;
-  maxItems: number;
-  itemFormatter: (item: any, index: number) => string;
-  headerTemplate: (total: number) => string;
-}): string {
-  const { data, emptyMessage, maxItems, itemFormatter, headerTemplate } = params;
-  
-  if (!data) return emptyMessage;
-  
-  const items = Array.isArray(data) ? data : (data.items || []);
-  if (items.length === 0) return emptyMessage;
-
-  const lines = items.slice(0, maxItems).map(itemFormatter);
-  const total = items.length;
-  const header = headerTemplate(total);
-  const footer = total > maxItems ? `\n\n还有 ${total - maxItems} 项未显示` : "";
-  
-  return header + lines.join("\n\n") + footer;
-}

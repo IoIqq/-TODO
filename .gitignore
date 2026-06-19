@@ -1,4 +1,4 @@
-# 依赖
+﻿# 依赖
 node_modules/
 
 # 编译输出
@@ -60,3 +60,8 @@ data/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# 工具目录
+.codegraph/
+.claude/
+logs/

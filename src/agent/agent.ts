@@ -32,6 +32,74 @@ export interface AgentRunResult {
   durationMs: number;
 }
 
+/**
+ * 纯闲聊判断：整句仅为问候/致谢/应答（且很短）时返回 true。
+ * 命中后跳过工具定义，避免每步重发 11 个工具的 JSON schema。
+ * 保守匹配——任何带任务意图的句子都不应命中。
+ */
+const CHITCHAT_RE =
+  /^(你好|您好|哈喽|哈啰|嗨|hi|hello|hey|在吗|在不在|早|早安|早上好|中午好|下午好|晚上好|晚安|谢谢|多谢|感谢|thanks?|thx|3q|好的|好滴|收到|嗯+|ok|okay|了解|明白|辛苦了|再见|拜拜|bye|哈哈+|呵呵+)[。.!！?？~～、,，\s]*$/i;
+
+function isPureChitchat(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length > 12) return false;
+  return CHITCHAT_RE.test(t);
+}
+
+/**
+ * 精简工具结果再回传给 LLM：只保留 LLM 决策所需字段，丢弃冗长内容。
+ * 不影响存入数据库与 toolCalls 的完整 result。
+ */
+function compactToolResultForLLM(toolName: string, result: any): any {
+  if (!result || typeof result !== "object") return result;
+  if (result.success === false) {
+    return { success: false, error: result.error };
+  }
+
+  const data = result.data;
+
+  if (toolName === "list_todos" && data?.todos) {
+    return {
+      success: true,
+      message: result.message,
+      todos: (data.todos as any[]).map((t) => ({
+        id: t.id,
+        title: t.title,
+        completed: t.completed,
+        ...(t.dueDate ? { dueDate: t.dueDate } : {}),
+        ...(t.priority ? { priority: t.priority } : {}),
+      })),
+      total: data.total,
+    };
+  }
+
+  if ((toolName === "recall_memory" || toolName === "list_memories") && Array.isArray(data)) {
+    return {
+      success: true,
+      message: result.message,
+      memories: data.map((m: any) => ({
+        key: m.key,
+        value: m.value,
+        ...(m.category ? { category: m.category } : {}),
+      })),
+    };
+  }
+
+  // 写操作类（create/complete/delete/save）：message 已足够，丢弃 data
+  if (data === undefined || data === null) {
+    return { success: result.success, message: result.message };
+  }
+
+  // 兜底：保留结构但限制体积，避免单个工具结果撑爆上下文
+  const json = JSON.stringify(result);
+  if (json.length <= 4000) return result;
+  return {
+    success: result.success,
+    message: result.message,
+    data: JSON.stringify(data).slice(0, 4000) + "…(已截断)",
+  };
+}
+
 export class Agent {
   private provider: AIProvider | null = null;
   private maxSteps: number;
@@ -102,7 +170,9 @@ export class Agent {
       { role: "user", content: options.userInput },
     ];
 
-    const tools = getToolDefinitions();
+    // 纯闲聊（"你好"/"谢谢"）无需工具，跳过工具 schema 节省 token
+    const skipTools = isPureChitchat(options.userInput);
+    const tools = skipTools ? undefined : getToolDefinitions();
 
     // 多轮 Function Calling
     for (let step = 1; step <= maxSteps; step++) {
@@ -110,7 +180,7 @@ export class Agent {
 
       const response = await this.provider.chatComplete({
         messages,
-        tools,
+        ...(tools ? { tools } : {}),
         temperature: 0.3,
       });
 
@@ -174,12 +244,12 @@ export class Agent {
           result,
         });
 
-        // 把工具结果作为 tool 消息加入历史
+        // 把工具结果作为 tool 消息加入历史（精简版，节省 token）
         messages.push({
           role: "tool",
           tool_call_id: toolCall.id,
           name: toolCall.function.name,
-          content: JSON.stringify(result),
+          content: JSON.stringify(compactToolResultForLLM(toolCall.function.name, result)),
         });
       }
     }
@@ -223,13 +293,16 @@ export class Agent {
       return result;
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : "";
       console.error(`[agent] Tool execution failed: ${toolCall.function.name}`, errMsg);
+      if (stack) console.error(`[agent] stack:\n${stack}`);
       return {
         success: false,
         error: errMsg,
       };
     }
   }
+
 
   private safeParseJSON(text: string): any {
     try {

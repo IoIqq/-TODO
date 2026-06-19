@@ -13,18 +13,20 @@ import type {
  */
 export class OpenAIProvider implements AIProvider {
   readonly name = 'openai';
+  private readonly chatCompletionsUrl: string;
 
   constructor(private readonly config: AIProviderConfig) {
     if (!config.apiBaseUrl) {
       throw new Error('OpenAI API base URL is required');
     }
+    this.chatCompletionsUrl = new URL('chat/completions', `${config.apiBaseUrl}/`).href;
   }
 
   async chat(params: ChatCompletionParams): Promise<string> {
     const { messages, temperature = 0, model } = params;
     const apiModel = model || this.config.model || 'gpt-4o-mini';
 
-    const response = await fetch(`${this.config.apiBaseUrl}/chat/completions`, {
+    const response = await fetch(this.chatCompletionsUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -72,7 +74,7 @@ export class OpenAIProvider implements AIProvider {
       requestBody.tool_choice = tool_choice ?? 'auto';
     }
 
-    const response = await fetch(`${this.config.apiBaseUrl}/chat/completions`, {
+    const response = await fetch(this.chatCompletionsUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -115,7 +117,7 @@ export class OpenAIProvider implements AIProvider {
     const { imageUrl, prompt, model } = params;
     const apiModel = model || this.config.visionModel || this.config.model || 'gpt-4o-mini';
 
-    const response = await fetch(`${this.config.apiBaseUrl}/chat/completions`, {
+    const response = await fetch(this.chatCompletionsUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

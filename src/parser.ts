@@ -1,4 +1,4 @@
-import { formatDateKey, formatDateTime, getZonedParts, utcMidnightForDate, zonedDateTimeToUtcMs } from "./time.js";
+import { allDayDeadlineUtcMs, formatDateKey, formatDateTime, getZonedParts, zonedDateTimeToUtcMs } from "./time.js";
 import type { TaskPriority, TodoDraft } from "./types.js";
 
 const PRIORITY_PATTERNS: Array<{ priority: TaskPriority; patterns: RegExp[] }> = [
@@ -20,8 +20,22 @@ const WEEKDAY_MAP: Record<string, number> = {
   天: 0,
 };
 
+type ParsedTemporal = { timestamp: string; is_all_day: boolean };
+
+const DATE_TEMPORAL_HINT = String.raw`(?:大后天|后天|明天|今天|20\d{2}[年\/.-]\d{1,2}[月\/.-]\d{1,2}日?|\d{1,2}[月\/.-]\d{1,2}日?|(?:下下|下|本|这)?(?:星期|礼拜|周)[一二三四五六日天])`;
+const TIME_TEMPORAL_HINT = String.raw`(?:(?:上午|下午|晚上|中午|凌晨)?\s*\d{1,2}\s*(?:[:点时]\s*\d{1,2}|[:点时]|半))`;
+const START_TEMPORAL_HINT = String.raw`(?:${DATE_TEMPORAL_HINT}\s*${TIME_TEMPORAL_HINT}?|${TIME_TEMPORAL_HINT})`;
+const START_TEMPORAL_PATTERNS = [
+  new RegExp(`(?:从\\s*)?${START_TEMPORAL_HINT}[^，。；;,.]{0,12}开始`),
+  new RegExp(`开始时间\\s*[:：]?\\s*${START_TEMPORAL_HINT}`),
+];
+
 function cleanWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function cleanTitle(value: string): string {
+  return cleanWhitespace(value.replace(/[，。；;,.]+/g, " "));
 }
 
 function splitItems(text: string): string[] {
@@ -60,7 +74,7 @@ function normalizeWeekdayToken(token: string): number | null {
   return typeof value === "number" ? value : null;
 }
 
-function parseAbsoluteDate(text: string): { match: RegExpMatchArray | null; year: number; month: number; day: number } {
+function parseAbsoluteDate(text: string, nowTimestamp: number, timeZone: string): { match: RegExpMatchArray | null; year: number; month: number; day: number } {
   const full = text.match(/(20\d{2})[年\/.-](\d{1,2})[月\/.-](\d{1,2})日?/);
   if (full) {
     return { match: full, year: Number(full[1]), month: Number(full[2]), day: Number(full[3]) };
@@ -68,10 +82,24 @@ function parseAbsoluteDate(text: string): { match: RegExpMatchArray | null; year
 
   const short = text.match(/(\d{1,2})[月\/.-](\d{1,2})日?/);
   if (short) {
-    return { match: short, year: new Date().getFullYear(), month: Number(short[1]), day: Number(short[2]) };
+    const current = getZonedParts(nowTimestamp, timeZone);
+    return { match: short, year: current.year, month: Number(short[1]), day: Number(short[2]) };
   }
 
   return { match: null, year: 0, month: 0, day: 0 };
+}
+
+function applyPeriod(hour: number, period: string | undefined): number {
+  if (period === "下午" || period === "晚上") {
+    return hour < 12 ? hour + 12 : hour;
+  }
+  if (period === "中午") {
+    return hour < 11 ? hour + 12 : hour;
+  }
+  if (period === "凌晨" || period === "上午") {
+    return hour === 12 ? 0 : hour;
+  }
+  return hour;
 }
 
 function parseTimeToken(text: string): { match: RegExpMatchArray | null; hour: number; minute: number } {
@@ -79,7 +107,7 @@ function parseTimeToken(text: string): { match: RegExpMatchArray | null; hour: n
   if (withMinute) {
     return {
       match: withMinute,
-      hour: Number(withMinute[2]),
+      hour: applyPeriod(Number(withMinute[2]), withMinute[1]),
       minute: Number(withMinute[3]),
     };
   }
@@ -88,7 +116,7 @@ function parseTimeToken(text: string): { match: RegExpMatchArray | null; hour: n
   if (withHalf) {
     return {
       match: withHalf,
-      hour: Number(withHalf[2]),
+      hour: applyPeriod(Number(withHalf[2]), withHalf[1]),
       minute: 30,
     };
   }
@@ -98,19 +126,7 @@ function parseTimeToken(text: string): { match: RegExpMatchArray | null; hour: n
     return { match: null, hour: 0, minute: 0 };
   }
 
-  let hour = Number(withHourOnly[2]);
-  const minute = 0;
-  const period = withHourOnly[1];
-
-  if (period === "下午" || period === "晚上") {
-    if (hour < 12) hour += 12;
-  } else if (period === "中午") {
-    if (hour < 11) hour += 12;
-  } else if (period === "凌晨" || period === "上午") {
-    if (hour === 12) hour = 0;
-  }
-
-  return { match: withHourOnly, hour, minute };
+  return { match: withHourOnly, hour: applyPeriod(Number(withHourOnly[2]), withHourOnly[1]), minute: 0 };
 }
 
 function parseWeekdayDate(
@@ -118,7 +134,7 @@ function parseWeekdayDate(
   nowTimestamp: number,
   timeZone: string,
 ): { match: RegExpMatchArray | null; year: number; month: number; day: number } {
-  const match = text.match(/(下下周|下周|本周)?([一二三四五六日天])/);
+  const match = text.match(/((?:下下|下|本|这)?(?:星期|礼拜|周))([一二三四五六日天])/);
   if (!match) {
     return { match: null, year: 0, month: 0, day: 0 };
   }
@@ -129,7 +145,7 @@ function parseWeekdayDate(
   }
 
   const modifier = match[1] ?? "本周";
-  const weekOffset = modifier === "下下周" ? 2 : modifier === "下周" ? 1 : 0;
+  const weekOffset = modifier.startsWith("下下") ? 2 : modifier.startsWith("下") ? 1 : 0;
   const current = getZonedParts(nowTimestamp, timeZone);
   const currentDate = new Date(Date.UTC(current.year, current.month - 1, current.day));
   const currentJsDay = currentDate.getUTCDay();
@@ -156,9 +172,107 @@ function extractNotes(text: string): { titleish: string; notes?: string } {
   };
 }
 
-function removeTemporalTokens(text: string, nowTimestamp: number, timeZone: string): { cleaned: string; due?: { timestamp: string; is_all_day: boolean } } {
+function extractTemporalValue(text: string, nowTimestamp: number, timeZone: string): ParsedTemporal | undefined {
+  const absolute = parseAbsoluteDate(text, nowTimestamp, timeZone);
+  const timeToken = parseTimeToken(text);
+  const hasTime = Boolean(timeToken.match);
+
+  if (absolute.match) {
+    if (hasTime) {
+      return {
+        timestamp: String(zonedDateTimeToUtcMs({
+          year: absolute.year,
+          month: absolute.month,
+          day: absolute.day,
+          hour: timeToken.hour,
+          minute: timeToken.minute,
+        }, timeZone)),
+        is_all_day: false,
+      };
+    }
+    return { timestamp: String(allDayDeadlineUtcMs(absolute.year, absolute.month, absolute.day, timeZone)), is_all_day: true };
+  }
+
+  const relativeMatchers: Array<[RegExp, number]> = [
+    [/大后天/, 3],
+    [/后天/, 2],
+    [/明天/, 1],
+    [/今天/, 0],
+  ];
+
+  for (const [pattern, offset] of relativeMatchers) {
+    if (!pattern.test(text)) continue;
+    const current = getZonedParts(nowTimestamp, timeZone);
+    const base = new Date(Date.UTC(current.year, current.month - 1, current.day + offset));
+    if (hasTime) {
+      return {
+        timestamp: String(zonedDateTimeToUtcMs({
+          year: base.getUTCFullYear(),
+          month: base.getUTCMonth() + 1,
+          day: base.getUTCDate(),
+          hour: timeToken.hour,
+          minute: timeToken.minute,
+        }, timeZone)),
+        is_all_day: false,
+      };
+    }
+    return { timestamp: String(allDayDeadlineUtcMs(base.getUTCFullYear(), base.getUTCMonth() + 1, base.getUTCDate(), timeZone)), is_all_day: true };
+  }
+
+  const weekday = parseWeekdayDate(text, nowTimestamp, timeZone);
+  if (weekday.match) {
+    if (hasTime) {
+      return {
+        timestamp: String(zonedDateTimeToUtcMs({
+          year: weekday.year,
+          month: weekday.month,
+          day: weekday.day,
+          hour: timeToken.hour,
+          minute: timeToken.minute,
+        }, timeZone)),
+        is_all_day: false,
+      };
+    }
+    return { timestamp: String(allDayDeadlineUtcMs(weekday.year, weekday.month, weekday.day, timeZone)), is_all_day: true };
+  }
+
+  if (hasTime) {
+    const current = getZonedParts(nowTimestamp, timeZone);
+    return {
+      timestamp: String(zonedDateTimeToUtcMs({
+        year: current.year,
+        month: current.month,
+        day: current.day,
+        hour: timeToken.hour,
+        minute: timeToken.minute,
+      }, timeZone)),
+      is_all_day: false,
+    };
+  }
+
+  return undefined;
+}
+
+function removeStartTemporalTokens(text: string, nowTimestamp: number, timeZone: string): { cleaned: string; start?: ParsedTemporal } {
+  for (const pattern of START_TEMPORAL_PATTERNS) {
+    const match = text.match(pattern);
+    if (!match) continue;
+
+    const matchedText = match[0];
+    const start = extractTemporalValue(matchedText, nowTimestamp, timeZone);
+    if (!start) continue;
+
+    let cleaned = text.replace(matchedText, " ");
+    cleaned = cleaned.replace(/\s*开始\s*/, " ");
+    return { cleaned: cleanWhitespace(cleaned), start };
+  }
+
+  return { cleaned: cleanWhitespace(text) };
+}
+
+function removeTemporalTokens(text: string, nowTimestamp: number, timeZone: string): { cleaned: string; due?: ParsedTemporal } {
   let cleaned = text;
-  const absolute = parseAbsoluteDate(cleaned);
+  const absolute = parseAbsoluteDate(cleaned, nowTimestamp, timeZone);
   const timeToken = parseTimeToken(cleaned);
   const hasTime = Boolean(timeToken.match);
 
@@ -182,14 +296,14 @@ function removeTemporalTokens(text: string, nowTimestamp: number, timeZone: stri
       return { cleaned: cleanWhitespace(cleaned), due: { timestamp: String(timestamp), is_all_day: false } };
     }
 
-    return { cleaned: cleanWhitespace(cleaned), due: { timestamp: String(utcMidnightForDate(absolute.year, absolute.month, absolute.day)), is_all_day: true } };
+    return { cleaned: cleanWhitespace(cleaned), due: { timestamp: String(allDayDeadlineUtcMs(absolute.year, absolute.month, absolute.day, timeZone)), is_all_day: true } };
   }
 
   const relativeMatchers: Array<[RegExp, number]> = [
-    [/今天/, 0],
-    [/明天/, 1],
-    [/后天/, 2],
     [/大后天/, 3],
+    [/后天/, 2],
+    [/明天/, 1],
+    [/今天/, 0],
   ];
 
   for (const [pattern, offset] of relativeMatchers) {
@@ -217,7 +331,7 @@ function removeTemporalTokens(text: string, nowTimestamp: number, timeZone: stri
 
     return {
       cleaned: cleanWhitespace(cleaned),
-      due: { timestamp: String(utcMidnightForDate(base.getUTCFullYear(), base.getUTCMonth() + 1, base.getUTCDate())), is_all_day: true },
+      due: { timestamp: String(allDayDeadlineUtcMs(base.getUTCFullYear(), base.getUTCMonth() + 1, base.getUTCDate(), timeZone)), is_all_day: true },
     };
   }
 
@@ -241,7 +355,7 @@ function removeTemporalTokens(text: string, nowTimestamp: number, timeZone: stri
 
     return {
       cleaned: cleanWhitespace(cleaned),
-      due: { timestamp: String(utcMidnightForDate(weekday.year, weekday.month, weekday.day)), is_all_day: true },
+      due: { timestamp: String(allDayDeadlineUtcMs(weekday.year, weekday.month, weekday.day, timeZone)), is_all_day: true },
     };
   }
 
@@ -268,16 +382,20 @@ function parseOneTodo(text: string, options: { now: number; timeZone: string; as
   const normalized = cleanWhitespace(text);
   const priorityResult = detectPriority(normalized);
   const noteResult = extractNotes(priorityResult.cleaned);
-  const temporalResult = removeTemporalTokens(noteResult.titleish, options.now, options.timeZone);
-  const title = cleanWhitespace(temporalResult.cleaned || noteResult.titleish).replace(/\s*(待办|todo|任务)\s*$/i, "").trim();
+  const startResult = removeStartTemporalTokens(noteResult.titleish, options.now, options.timeZone);
+  const temporalResult = removeTemporalTokens(startResult.cleaned, options.now, options.timeZone);
+  const title = cleanTitle(temporalResult.cleaned || startResult.cleaned || noteResult.titleish).replace(/\s*(待办|todo|任务)\s*$/i, "").trim();
 
   const result: TodoDraft = {
     title: title || normalized,
     priority: priorityResult.priority,
-    fallbackUsed: priorityResult.ambiguous || !title || !temporalResult.due,
+    fallbackUsed: priorityResult.ambiguous || !title || (!temporalResult.due && !startResult.start),
     ...(options.assigneeOpenId ? { assigneeOpenId: options.assigneeOpenId } : {}),
   };
 
+  if (startResult.start) {
+    result.start = startResult.start;
+  }
   if (temporalResult.due) {
     result.due = temporalResult.due;
   }
@@ -296,6 +414,11 @@ export function parseTodoDrafts(text: string, options: { now?: number; timeZone:
 
 export function formatTodoDraftSummary(task: TodoDraft, timeZone: string): string {
   const lines = [`标题：${task.title}`, `优先级：${task.priority}`];
+  if (task.start) {
+    const ts = Number(task.start.timestamp);
+    const when = task.start.is_all_day ? formatDateKey(ts, timeZone) : formatDateTime(ts, timeZone);
+    lines.push(`开始：${when}${task.start.is_all_day ? "（全天）" : ""}`);
+  }
   if (task.due) {
     const ts = Number(task.due.timestamp);
     const when = task.due.is_all_day ? formatDateKey(ts, timeZone) : formatDateTime(ts, timeZone);

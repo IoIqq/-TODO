@@ -8,6 +8,7 @@ export interface ParsedDue {
 export interface TodoDraft {
   title: string;
   due?: ParsedDue;
+  start?: ParsedDue;
   priority: TaskPriority;
   risk?: "high" | "medium" | "low";
   assigneeOpenId?: string;

@@ -1,0 +1,58 @@
+=========================================
+Windows Server 部署命令
+请在 114.55.13.176 服务器上按顺序执行
+=========================================
+
+1. 解压 feishu-todo-deploy.zip 到指定目录后，进入该目录：
+   cd C:\Apps\feishu-todo-deploy
+
+2. 安装生产依赖（自动处理 better-sqlite3）：
+   npm install --omit=dev
+
+3. 如果仍报原生模块错误，再重建：
+   npm rebuild better-sqlite3 --build-from-source
+
+4. 确认 .env 配置正确（端口、飞书凭证等）：
+   notepad .env
+
+5. 以管理员身份运行 PowerShell，安装 Windows 服务：
+   .\install-service.ps1
+
+   注意：install-service.ps1 现在会自动检查并安装 better-sqlite3
+
+6. 配置防火墙开放端口 80：
+   New-NetFirewallRule -DisplayName 'Feishu Bot' -Direction Inbound -LocalPort 80 -Protocol TCP -Action Allow
+
+7. 更新飞书后台回调地址为：
+   http://114.55.13.176/feishu/events
+
+8. 查看服务状态和日志：
+   Get-Service FeishuTodoBot
+   Get-Content logs\stdout.log -Tail 50
+   Get-Content logs\stderr.log -Tail 50
+
+=========================================
+故障排查
+=========================================
+
+如果服务启动后仍然报错 "Cannot find package 'better-sqlite3'"：
+
+1. 停止服务：
+   Stop-Service FeishuTodoBot
+
+2. 确认在部署目录（C:\Apps\feishu-todo-deploy）下执行：
+   cd C:\Apps\feishu-todo-deploy
+
+3. 手动重建 better-sqlite3：
+   npm rebuild better-sqlite3 --build-from-source
+
+4. 检查是否存在：
+   Test-Path node_modules\better-sqlite3
+
+5. 重新启动服务：
+   Start-Service FeishuTodoBot
+
+6. 查看日志确认启动成功：
+   Get-Content logs\stdout.log -Tail 20
+
+=========================================

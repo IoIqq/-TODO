@@ -16,11 +16,14 @@ import {
 import { OperationHistory } from "./history/operation-history.js";
 import { Agent } from "./agent/agent.js";
 import { ConversationStore } from "./storage/index.js";
+import { isDuplicateEvent, rememberEvent as rememberEventPersistent } from "./storage/db.js";
 import type { DailyReminderScheduler } from "./scheduler/daily-reminder.js";
+import type { DeadlineReminderScheduler } from "./scheduler/deadline-reminder.js";
 
 export interface TodoBotDependencies {
   fetchImpl?: typeof fetch;
   reminderScheduler?: DailyReminderScheduler;
+  deadlineReminderScheduler?: DeadlineReminderScheduler;
 }
 
 export interface TodoBotApp {
@@ -83,14 +86,25 @@ function decryptIfNeeded(body: unknown, config: AppConfig): unknown {
 
 function validateEnvelope(config: AppConfig, envelope: FeishuEventEnvelope<unknown>): void {
   const token = envelope.header?.token ?? envelope.token;
-  if (token && token !== config.feishuVerificationToken) {
+  if (token !== config.feishuVerificationToken) {
     throw new Error("Invalid verification token");
   }
 }
 
-const SEEN_EVENTS_MAX = 1000;
+function maskSecret(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  if (value.length <= 8) return "****";
+  return `${value.slice(0, 4)}****${value.slice(-4)}`;
+}
 
-// 系统命令类型
+function isAdminAuthorized(config: AppConfig, request: Request): boolean {
+  if (!config.adminToken) return false;
+  const authorization = request.headers.get("Authorization") ?? "";
+  return authorization === `Bearer ${config.adminToken}`;
+}
+
+
+  // 系统命令类型
 type SystemCommand = 
   | { type: 'history'; limit?: number }
   | { type: 'repeat' }
@@ -117,17 +131,28 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
   const enableAgent = (process.env.ENABLE_AGENT?.toLowerCase() ?? "true") !== "false";
   console.log(`[app] Agent ${agent.isAvailable() && enableAgent ? "enabled" : "disabled"} (available=${agent.isAvailable()}, configured=${enableAgent})`);
 
-  function rememberEvent(eventId: string): void {
-    seenEvents.add(eventId);
-    if (seenEvents.size > SEEN_EVENTS_MAX) {
-      const overflow = seenEvents.size - SEEN_EVENTS_MAX;
-      const iterator = seenEvents.values();
-      for (let i = 0; i < overflow; i += 1) {
-        const next = iterator.next();
-        if (next.done) break;
-        seenEvents.delete(next.value);
-      }
-    }
+  // 诊断/统计计数器
+  const startedAt = Date.now();
+  const stats = {
+    eventsReceived: 0,
+    messagesHandled: 0,
+    cardActionsHandled: 0,
+    agentSuccess: 0,
+    agentFailed: 0,
+    chatFallback: 0,
+    lastError: null as { time: number; message: string } | null,
+    recentEventIds: [] as string[],
+  };
+  function recordEvent(id: string): void {
+    stats.eventsReceived += 1;
+    stats.recentEventIds.unshift(id);
+    if (stats.recentEventIds.length > 10) stats.recentEventIds.length = 10;
+  }
+  function recordError(err: unknown): void {
+    stats.lastError = {
+      time: Date.now(),
+      message: err instanceof Error ? err.message : String(err),
+    };
   }
 
   /**
@@ -391,10 +416,33 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
       }
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
+      const errStack = error instanceof Error ? error.stack : "";
       console.error("[agent] failed:", errMsg);
-      await client.replyText(messageId, `❌ Agent 出错：${errMsg.substring(0, 200)}`);
+      if (errStack) console.error(`[agent] stack:\n${errStack}`);
+      stats.agentFailed += 1;
+      recordError(error);
+
+      // Fallback：Agent 失败 → 走简单 chat → 都失败才发兜底文本
+      try {
+        stats.chatFallback += 1;
+        console.log("[agent] falling back to chat mode");
+        await handleChat(text, messageId, userId);
+      } catch (fallbackError) {
+        console.error("[agent] chat fallback also failed:", fallbackError);
+        try {
+          await client.replyText(
+            messageId,
+            `❌ AI 暂时不可用：${errMsg.substring(0, 150)}\n\n请稍后重试，或访问 /admin/diag 查看诊断信息。`,
+          );
+        } catch (replyErr) {
+          console.error("[agent] final reply failed:", replyErr);
+        }
+      }
+      return;
     }
+    stats.agentSuccess += 1;
   }
+
 
   /**
    * 智能聊天回复
@@ -433,13 +481,14 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
       console.log(`[feishu] handling query command: ${text}`);
       
       const records = await client.listRecords({ pageSize: 100 });
-      
-      if (records.length === 0) {
-        await client.replyText(messageId, "📋 暂无任务");
+      const pendingRecords = records.filter((record) => !record.fields["是否已完成"]);
+
+      if (pendingRecords.length === 0) {
+        await client.replyText(messageId, "📋 暂无未完成任务");
         return;
       }
 
-      const tasks: TaskListItem[] = records.map((record) => ({
+      const tasks: TaskListItem[] = pendingRecords.map((record) => ({
         recordId: record.record_id,
         title: String(record.fields["待办事项"] || "未命名任务"),
         dueDate: record.fields["截止日期"] ? String(record.fields["截止日期"]) : undefined,
@@ -447,7 +496,7 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
       }));
 
       await client.replyCard(messageId, buildTaskListCard({ tasks }));
-      console.log(`[feishu] query command completed, returned ${records.length} tasks`);
+      console.log(`[feishu] query command completed, returned ${pendingRecords.length} pending tasks`);
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error(`[feishu] query command failed: ${errorMsg}`);
@@ -630,10 +679,13 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
       `[feishu] message event id=${envelope.header.event_id} type=${envelope.event.message?.message_type ?? "unknown"} message_id=${envelope.event.message?.message_id ?? "unknown"}`,
     );
 
-    if (seenEvents.has(envelope.header.event_id)) {
-      return jsonResponse({ ok: true, deduped: true });
+    if (isDuplicateEvent(envelope.header.event_id, seenEvents)) {
+      return jsonResponse({ code: 0 });
     }
-    rememberEvent(envelope.header.event_id);
+    rememberEventPersistent(envelope.header.event_id, seenEvents);
+    recordEvent(envelope.header.event_id);
+    stats.messagesHandled += 1;
+
 
     const message = envelope.event.message;
     if (!message) {
@@ -730,9 +782,7 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
               return;
           }
         } else {
-          console.log(`[router] low confidence, fallback to chat`);
-          await handleChat(text, message.message_id, actorOpenId);
-          return;
+          console.log(`[router] low confidence, trying deterministic todo parser`);
         }
 
         // 3. 待办创建流程
@@ -835,13 +885,19 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
       }
     })();
 
-    return jsonResponse({ ok: true });
+    return jsonResponse({ code: 0 });
   }
 
   async function handleCardAction(envelope: FeishuEventEnvelope<FeishuCardActionEvent>): Promise<Response> {
+    if (isDuplicateEvent(envelope.header.event_id, seenEvents)) {
+      return jsonResponse({ code: 0 });
+    }
+    rememberEventPersistent(envelope.header.event_id, seenEvents);
+    stats.cardActionsHandled += 1;
     const value = envelope.event.action?.value;
     const action = value?.action;
     const token = typeof value?.confirm_token === "string" ? value.confirm_token : undefined;
+
 
     // CLI 确认
     if (action === "confirm_cli" && token) {
@@ -878,14 +934,101 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
   }
 
   async function handler(request: Request): Promise<Response> {
-    const url = new URL(request.url);
+    let url: URL;
+    try {
+      url = new URL(request.url);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`[app] Invalid request URL: ${msg}`);
+      return textResponse("Bad Request: Invalid URL", 400);
+    }
+
     if (request.method === "GET" && url.pathname === "/health") {
       return textResponse("ok");
+    }
+
+    // 诊断端点：返回服务状态、AI 状态、token 状态、最近事件等
+    // GET /admin/diag
+    if (request.method === "GET" && url.pathname === "/admin/diag") {
+      if (!isAdminAuthorized(config, request)) {
+        return textResponse("Unauthorized", 401);
+      }
+
+      const uptimeMs = Date.now() - startedAt;
+      const uptimeStr = `${Math.floor(uptimeMs / 3600000)}h ${Math.floor((uptimeMs % 3600000) / 60000)}m ${Math.floor((uptimeMs % 60000) / 1000)}s`;
+
+      // 测试飞书 token
+      let tokenStatus: { ok: boolean; error?: string } = { ok: false };
+      try {
+        await client.getTenantAccessToken();
+        tokenStatus = { ok: true };
+      } catch (e) {
+        tokenStatus = { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+
+      // 测试 AI（不阻塞太久）
+      let aiStatus: { ok: boolean; reply?: string; error?: string; latencyMs?: number } = { ok: false };
+      const wantPing = url.searchParams.get("ping") !== "false";
+      if (wantPing && config.openaiApiKey) {
+        const aiStart = Date.now();
+        try {
+          const reply = await Promise.race([
+            aiClient.chat({ userInput: "回复 ok 两个字，不要其他内容", chatHistory: [] }),
+            new Promise<string>((_, reject) => setTimeout(() => reject(new Error("AI ping timeout 8s")), 8000)),
+          ]);
+          aiStatus = { ok: true, reply: String(reply).substring(0, 100), latencyMs: Date.now() - aiStart };
+        } catch (e) {
+          aiStatus = {
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+            latencyMs: Date.now() - aiStart,
+          };
+        }
+      } else if (!config.openaiApiKey) {
+        aiStatus = { ok: false, error: "OPENAI_API_KEY not configured" };
+      } else {
+        aiStatus = { ok: true, reply: "(skipped, ?ping=false)" };
+      }
+
+      return jsonResponse({
+        ok: true,
+        time: new Date().toISOString(),
+        uptime: uptimeStr,
+        config: {
+          port: config.port,
+          timezone: config.timezone,
+          aiProvider: config.aiProvider || "openai",
+          aiModel: config.openaiModel,
+          aiBaseUrl: maskSecret(config.openaiApiBaseUrl),
+          enableAgent,
+          enableSmartAssistant: config.enableSmartAssistant,
+          enableQuickMode: config.enableQuickMode,
+          enableDailyReminder: config.enableDailyReminder,
+          enableDeadlineReminder: config.enableDeadlineReminder,
+        },
+        feishu: {
+          appId: maskSecret(config.feishuAppId),
+          tenantTokenStatus: tokenStatus,
+          baseToken: maskSecret(config.feishuBaseToken),
+          tableId: maskSecret(config.feishuBaseTableId),
+        },
+        ai: aiStatus,
+        agent: {
+          available: agent.isAvailable(),
+          enabled: enableAgent,
+        },
+        deadlineReminder: deps.deadlineReminderScheduler?.getDiagnostics?.(),
+        stats,
+      });
     }
 
     // 调试：手动触发一次提醒
     // GET /admin/test-reminder?slot=morning|evening
     if (request.method === "GET" && url.pathname === "/admin/test-reminder") {
+      if (!isAdminAuthorized(config, request)) {
+        return textResponse("Unauthorized", 401);
+      }
+
       if (!deps.reminderScheduler) {
         return jsonResponse({ ok: false, error: "reminderScheduler not configured" }, 400);
       }
@@ -893,6 +1036,34 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
       const slot = slotParam === "evening" ? "evening" : "morning";
       const result = await deps.reminderScheduler.runOnce(slot);
       return jsonResponse({ ok: true, slot, ...result });
+    }
+
+    // 调试：手动触发一次截止时间提醒检查
+    // GET /admin/test-deadline-reminder
+    if (request.method === "GET" && url.pathname === "/admin/test-deadline-reminder") {
+      if (!isAdminAuthorized(config, request)) {
+        return textResponse("Unauthorized", 401);
+      }
+
+      if (!deps.deadlineReminderScheduler) {
+        return jsonResponse({ ok: false, error: "deadlineReminderScheduler not configured" }, 400);
+      }
+      const result = await deps.deadlineReminderScheduler.runOnce();
+      return jsonResponse({ ok: true, ...result });
+    }
+
+    // 管理：手动对账飞书表格与本地截止提醒投影
+    // POST /admin/reconcile-deadline-reminders
+    if (request.method === "POST" && url.pathname === "/admin/reconcile-deadline-reminders") {
+      if (!isAdminAuthorized(config, request)) {
+        return textResponse("Unauthorized", 401);
+      }
+
+      if (!deps.deadlineReminderScheduler) {
+        return jsonResponse({ ok: false, error: "deadlineReminderScheduler not configured" }, 400);
+      }
+      const result = await deps.deadlineReminderScheduler.reconcile();
+      return jsonResponse({ ok: true, ...result });
     }
 
     if (request.method !== "POST") {
@@ -919,14 +1090,14 @@ export function createTodoBotApp(config: AppConfig, deps: TodoBotDependencies = 
     }
 
     const envelope = decrypted as FeishuEventEnvelope<unknown>;
-    if (typeof envelope.challenge === "string") {
-      return jsonResponse({ challenge: envelope.challenge });
-    }
-
     try {
       validateEnvelope(config, envelope);
     } catch {
       return textResponse("Unauthorized", 401);
+    }
+
+    if (typeof envelope.challenge === "string") {
+      return jsonResponse({ challenge: envelope.challenge });
     }
 
     switch (envelope.header?.event_type) {

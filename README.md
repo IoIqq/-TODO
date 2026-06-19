@@ -1,483 +1,369 @@
-# 飞书 Todo 智能机器人
+# 飞书智能 Todo 助手
 
-一个功能强大的飞书私聊机器人，帮你用自然语言快速创建待办任务，并自动写入飞书多维表格。支持 AI 增强解析、图片识别、智能优化等高级功能。
+一个驻守在飞书里的私人助理：自然语言聊天 → AI Agent 自动调度工具 → 写入多维表格、查日程、找文档、回审批，每天 08:30 / 18:30 自动汇总待办。
 
----
-
-## 🚀 快速开始（3 步）
-
-### 1️⃣ 双击启动
-```
-双击"一键启动.bat"
-```
-
-### 2️⃣ 复制地址
-```
-在"内网穿透"窗口复制公网地址
-格式: https://xxx.trycloudflare.com
-```
-
-### 3️⃣ 配置飞书
-```
-访问 https://open.feishu.cn/
-配置回调: https://你的地址/feishu/events
-```
-
-✅ **完成！现在可以在飞书中使用了**
-
-💡 **详细说明请查看：[使用指南.txt](./使用指南.txt)**
+> 当前 Git 仓库：https://github.com/IoIqq/-TODO
 
 ---
 
-## ✨ 核心功能
+## 📑 目录
 
-### 📝 基础功能
-- **自然语言解析** - 直接说话创建待办，自动识别时间、优先级、备注
-- **多任务批量创建** - 一次输入多个任务，用分号分隔
-- **确认机制** - 先预览总结，确认后再写入多维表格
-- **多维表格集成** - 自动写入飞书多维表格，支持自定义字段映射
-
-### 🤖 AI 增强功能
-- **📸 图片识别** - 发送截图自动提取任务信息（会议通知、聊天记录等）
-- **🎯 智能优化** - 分析待办清单，提供优先级、时间冲突、任务分解建议
-- **🧠 增强解析** - AI 辅助理解复杂的任务描述，提高准确率
-
-### 🔧 技术特性
-- **TypeScript** - 类型安全，易于维护
-- **事件去重** - 防止重复处理飞书事件
-- **加密支持** - 支持飞书消息加密推送
-- **灵活配置** - 通过环境变量控制所有功能开关
+- [快速上手](#快速上手)
+- [功能一览](#功能一览)
+- [配置项](#配置项)
+- [使用方式](#使用方式)
+- [每日定时提醒](#每日定时提醒)
+- [截止时间提醒](#截止时间提醒)
+- [项目结构](#项目结构)
+- [开发与部署](#开发与部署)
+- [故障排查](#故障排查)
 
 ---
 
-## 🚀 快速开始
+## 快速上手
 
-### 1. 环境要求
-
+### 环境要求
 - Node.js 18+
-- npm 或 yarn
-- 飞书企业自建应用
-- 飞书多维表格（用于存储任务）
+- 一个飞书企业自建应用
+- 一份飞书多维表格（已有：`HEAHbiuUFaQhE7siqzic9vjvnpf` / `tblXUkCfVMPg2hCv`）
 
-### 2. 安装依赖
-
-```bash
+### 三步启动
+```powershell
+# 1. 装依赖
 npm install
+
+# 2. 配置 .env（复制 .env.example 改）
+copy .env.example .env
+
+# 3. 启动
+.\快速启动.bat
 ```
 
-### 3. 配置环境变量
+启动后看到这两行表示就绪：
+```
+[scheduler] Daily reminder started ...
+Feishu Todo bot listening on http://localhost:17234
+```
 
-复制 `.env.example` 为 `.env`，填写以下配置：
+### 飞书侧配置（一次性）
+1. 去 [飞书开放平台](https://open.feishu.cn/) 创建企业自建应用
+2. 开启事件订阅：`im.message.receive_v1` + `card.action.trigger`
+3. 配置回调地址：`https://你的内网穿透地址/feishu/events`
+4. 申请权限：`im:message`、`bitable:app`、`contact:user.base:readonly` 等
+
+---
+
+## 功能一览
+
+### 💬 智能对话（AI Agent）
+直接在飞书私聊里说话即可。Agent 会自动选择并多轮调用工具：
+
+| 你说 | Agent 做的事 |
+|-----|-------------|
+| "明天 3 点提交周报 p1" | 调 `create_todo` 工具创建待办 |
+| "我有什么待办" | 调 `list_todos` 列出未完成任务 |
+| "把买菜标记完成" | 调 `complete_todo` 模糊匹配并完成 |
+| "记一下：我喜欢深色主题" | 调 `save_memory` 存进长期记忆 |
+| "明天日程是什么" | 调 `view_calendar` 查日历 |
+| "找张三" | 调 `search_contact` 找联系人 |
+| "查找项目方案文档" | 调 `search_docs` 搜文档 |
+
+工具集（共 11 个）：
+- 待办 4 个：`list_todos / create_todo / complete_todo / delete_todo`
+- 记忆 3 个：`save_memory / recall_memory / list_memories`
+- 飞书 4 个：`view_calendar / search_contact / search_docs / list_approvals`
+
+### 📋 自然语言解析（不依赖 AI）
+即使没配 OpenAI，也能识别基础时间和优先级：
+
+```
+明天 3 点提交周报 p1；整理方案 备注: 带截图
+```
+↓
+解析为 2 条待办，第一条 `明天15:00 截止 / 高优先级`，第二条 `备注: 带截图`。
+
+支持：
+- 时间：明天、后天、下周一、下个月、2026-06-01、15:00
+- 优先级：`p1/p2/p3` 或 `高/中/低`
+- 备注：`备注:`、`注意:`、`说明:`
+- 批量：用分号 `;` 或换行分隔
+
+### ⏰ 每日定时提醒
+- 08:30 早安卡片：列出今日 + 逾期 + 后续
+- 18:30 晚间卡片：检查今天的进度
+- 按"执行人"分组发送，每人一张
+- 卡片自带「✅完成 / ⏰延期」按钮
+
+详见 [每日定时提醒](#每日定时提醒) 章节。
+
+### 🎨 卡片交互
+确认创建、完成任务、延期、删除全部支持卡片按钮，无需打字。
+
+### 📦 快捷命令（兜底）
+不想跟 AI 聊也可以打命令：
+
+| 命令 | 作用 |
+|-----|------|
+| `/帮助` | 显示所有命令 |
+| `/待办` | 列出待办 |
+| `/日程` | 查今日日程 |
+| `/找 张三` | 搜联系人 |
+| `/文档 项目方案` | 搜文档 |
+| `/审批` | 待审批列表 |
+| `/任务` | 任务列表 |
+| `/历史 10` | 最近 10 次操作记录 |
+| `/重复` | 重复上次操作 |
+| `/缓存` | 缓存统计 |
+| `/清除缓存 [类型]` | 清缓存 |
+
+### 🧠 长期记忆
+跨会话记住用户偏好。存在本地 SQLite (`./data/feishu-bot.db`)。
+
+---
+
+## 配置项
+
+完整配置见 `.env.example`。**最小可运行配置**只需 5 项：
 
 ```env
-# 飞书应用配置（必填）
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=xxx
 FEISHU_VERIFICATION_TOKEN=xxx
-FEISHU_ENCRYPT_KEY=xxx
-
-# 多维表格配置（必填）
 FEISHU_BASE_TOKEN=HEAHbiuUFaQhE7siqzic9vjvnpf
 FEISHU_BASE_TABLE_ID=tblXUkCfVMPg2hCv
-
-# AI 配置（可选，启用 AI 功能需要）
-OPENAI_API_BASE_URL=https://api.openai.com/v1
-OPENAI_API_KEY=sk-xxx
-OPENAI_MODEL=gpt-4o-mini
-OPENAI_VISION_MODEL=  # 留空则使用 OPENAI_MODEL
-
-# AI 功能开关（可选）
-ENABLE_IMAGE_RECOGNITION=true      # 图片识别
-ENABLE_TODO_OPTIMIZATION=true      # 智能优化
-ENABLE_AI_PARSE=true               # AI 增强解析
-
-# 快速模式（推荐手机端使用）
-ENABLE_QUICK_MODE=false            # true=跳过确认直接写入
-
-# 其他配置
-PORT=3000
-APP_TIMEZONE=Asia/Shanghai
 ```
 
-### 4. 启动服务
+### 主要开关
 
-**开发模式（热重载）：**
+| 变量 | 默认 | 说明 |
+|-----|------|-----|
+| `PORT` | 17234 | 服务端口 |
+| `APP_TIMEZONE` | Asia/Shanghai | 时区 |
+| `OPENAI_API_KEY` | 无 | 不填则禁用 AI |
+| `OPENAI_API_BASE_URL` | api.openai.com | 兼容 Ollama / LM Studio / 自建网关 |
+| `OPENAI_MODEL` | gpt-4.1-mini | 推荐 4o-mini 或同档 |
+| `ENABLE_AGENT` | true | Agent 模式 |
+| `ENABLE_QUICK_MODE` | false | true=跳过确认直接写入 |
+| `ENABLE_DAILY_REMINDER` | true | 每日定时提醒 |
+| `DAILY_MORNING_CRON` | `30 8 * * *` | 早晨 cron |
+| `DAILY_EVENING_CRON` | `30 18 * * *` | 晚间 cron |
+| `ENABLE_CHAT_MEMORY` | false | 对话历史落库到飞书表 |
+| `ENABLE_SMART_ASSISTANT` | false | 启用 lark-cli 调用日历/审批等 |
+
+### 多维表格字段
+
+主任务表至少需要这些字段（飞书自动建议字段名一致即可，缺字段会自动忽略）：
+
+| 字段 | 类型 | 必需 |
+|-----|-----|-----|
+| 待办事项 | 文本 | ✅ |
+| 截止日期 | 日期 | 推荐 |
+| 优先级 | 单选（🔴P0-高优 / 🟡P1-一般 / 🟢P2-低优） | 推荐 |
+| 是否已完成 | 复选框 | ✅ |
+| 执行人 | 人员 | 收提醒必需 |
+| 备注 | 文本 | 可选 |
+
+---
+
+## 使用方式
+
+### 方式 1：和 Agent 自然聊天（推荐）
+```
+你：明天三点产品评审，把会议记录张三也加进来
+Bot：好的，已为你创建：
+     📋 产品评审 · 明天 15:00 · 张三
+```
+
+### 方式 2：批量创建
+```
+你：明天 3 点提交周报 p1；整理方案；下周一 客户会议
+```
+
+### 方式 3：发图（需要 Vision 模型）
+直接把会议通知截图甩给 Bot，自动 OCR 提取任务。
+
+### 方式 4：查询 + 操作
+```
+你：我有哪些待办
+Bot：[卡片 - 列出 6 项，每项带 完成/延期/删除 按钮]
+```
+
+---
+
+## 每日定时提醒
+
+### 工作原理
+服务启动时挂载两个 cron：
+- `30 8 * * *` (08:30) → 早晨提醒
+- `30 18 * * *` (18:30) → 晚间提醒
+
+到点时：
+1. 拉取所有未完成待办
+2. 按"执行人"分组（**没填执行人的跳过**）
+3. 给每位执行人发一张分组卡片：⚠️逾期 / 📌今日 / 📅后续 / 📝无截止
+4. 排序：逾期最久的最前
+
+### 立即测试
+```
+http://localhost:17234/admin/test-reminder?slot=morning
+http://localhost:17234/admin/test-reminder?slot=evening
+```
+浏览器或 curl 都行，不用等到点。
+
+### 改时间
+编辑 `.env`：
+```env
+DAILY_MORNING_CRON=30 8 * * *    # 分 时 日 月 星期
+DAILY_EVENING_CRON=30 18 * * *
+```
+
+### ⚠️ 注意
+- 服务必须在线才会触发，关机/关服务的时间点**不会补发**
+- 长期可靠运行建议部署到云服务器（见 `deploy-template/`）
+- 或改用飞书多维表格自动化（详见仓库历史 commit 中的指南）
+
+## 截止时间提醒
+
+飞书多维表格是唯一事实源；本地 SQLite 只保存可重建的截止提醒投影。创建、延期、完成、删除和每小时对账都会修正本地提醒表。
+
+### 规则
+- 具体时间任务：到达截止时间的瞬间即逾期。
+- 全天任务：按 `APP_TIMEZONE` 当天 23:59 作为截止瞬间。
+- P0：截止前 60 分钟提醒；逾期提醒总共 3 次，包含截止时刻那一次（sequence 0/1/2），后续每 10 分钟一次。
+- P1：截止前 30 分钟提醒；逾期提醒总共 3 次，后续每 4 小时一次。
+- P2：不做提前提醒，只在截止时刻提醒一次。
+- 同一轮同一用户同类提醒超过 10 条时会拆成多张卡片，只把实际发送成功的提醒标记为已发送。
+
+### 对账
+- 服务启动后每小时从飞书表格拉取未完成、有截止时间、有执行人的记录，对本地 `deadline_reminders` 投影做重建/取消。
+- 用户直接在飞书表格里完成、删除、改期或换执行人，下一次对账会自动修正本地 pending/processing 提醒。
+- 已发送过的逾期 sequence 会保留，不会因为对账从 sequence 0 重新提醒。
+
+### Admin 调试接口
+请求都需要 `Authorization: Bearer <ADMIN_TOKEN>`。
+
 ```bash
-npm run dev
+curl -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:17234/admin/diag?ping=false
+curl -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:17234/admin/test-deadline-reminder
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:17234/admin/reconcile-deadline-reminders
 ```
 
-**生产模式：**
-```bash
-npm run build
-npm start
-```
-
-**Windows 快捷启动：**
-```powershell
-.\start-dev.ps1
-```
-
-### 5. 配置飞书应用
-
-1. 访问 [飞书开放平台](https://open.feishu.cn/)
-2. 创建企业自建应用，获取凭据
-3. 开启机器人能力
-4. 订阅事件：
-   - `im.message.receive_v1` - 接收消息
-   - `card.action.trigger` - 卡片交互
-5. 配置回调地址：
-   - 事件订阅：`https://你的域名/feishu/events`
-   - 卡片回调：`https://你的域名/feishu/events`
-6. 开通权限：
-   - `im:message` - 接收和发送消息
-   - `bitable:app` - 多维表格读写
+`/admin/diag` 会返回本地截止提醒指标：pending、processing、sent、cancelled、当前 overdue 数、最近运行时间、最近错误和最近对账结果。
 
 ---
 
-## 📖 使用指南
+### 部署遇到 `better-sqlite3` 报错怎么办？
+如果服务器日志出现类似下面的错误：
 
-### 基础用法
-
-直接私聊机器人，用自然语言描述任务：
-
-```
-明天 3 点提交周报 p1
+```text
+ERR_MODULE_NOT_FOUND: Cannot find package 'better-sqlite3'
 ```
 
-```
-下周一 处理客户反馈；整理方案 备注: 要附上截图
-```
+请按这个顺序处理：
 
-机器人会回复一个确认卡片，显示解析结果。点击 **"确认写入"** 后，任务会自动写入多维表格。
+1. 确认是在**解压后的部署目录**里执行命令
+2. 安装生产依赖：
+   ```powershell
+   npm install --omit=dev
+   ```
+3. 如果仍然报原生模块问题，再重建：
+   ```powershell
+   npm rebuild better-sqlite3 --build-from-source
+   ```
+4. 确保 Windows Server 上已安装 Node.js LTS；若需要从源码编译，需安装 Visual Studio Build Tools
 
-### 支持的时间格式
-
-- **相对时间**：明天、后天、下周一、下个月
-- **具体时间**：2026-06-01、6月1日、15:00
-- **组合表达**：明天下午3点、下周一上午
-
-### 优先级标记
-
-- `p1` / `高` / `紧急` → 高优先级
-- `p2` / `中` / `普通` → 中优先级  
-- `p3` / `低` → 低优先级
-
-### 备注信息
-
-使用 `备注:`、`注意:`、`说明:` 等关键词添加备注：
-
-```
-完成项目方案 备注: 需要附上数据分析和截图
-```
-
-### 批量创建
-
-用分号 `;` 分隔多个任务：
-
-```
-明天 3点 提交周报 p1；整理方案；下周一 客户会议
-```
+当前的 `deploy-template/install-service.ps1` 已经会自动执行以上检查和安装步骤。
 
 ---
 
-## 🤖 AI 功能使用
-
-### 📸 图片识别
-
-**使用方法：** 直接发送图片给机器人
-
-**支持场景：**
-- 会议通知截图
-- 聊天记录截图
-- 文档/笔记截图
-- 任务清单截图
-
-**示例：**
-```
-[发送会议通知截图]
-
-机器人回复：
-🔍 正在识别图片中的任务信息...
-
-✅ 已从图片中识别并创建 2 个任务：
-1. 产品评审会 - 2026-05-28 14:00
-2. 准备评审材料 - 2026-05-28 13:00
-```
-
-### 🎯 智能优化
-
-**使用方法：** 发送以下命令之一
-
-```
-优化
-优化任务
-优化待办
-整理任务
-optimize
-```
-
-**功能：**
-- ⚡ 优先级合理性分析
-- ⏰ 时间冲突检测
-- 🔨 任务分解建议
-- 🔗 任务合并建议
-- ⏱️ 完成时间预估
-- 📊 工作负荷评估
-
-**示例：**
-```
-用户：优化
-
-机器人：
-🤔 正在分析你的待办清单...
-
-⚠️ 发现 3 个优化建议：
-
-1. 🔴 时间冲突
-   "客户会议"(14:00) 和 "团队周会"(14:30) 时间重叠
-   💡 建议将团队周会改到 16:00
-
-2. 🟡 优先级
-   "提交周报"截止今天 18:00，建议改为高优先级
-
-3. 🟢 任务分解
-   "完成项目方案"任务较大，建议拆分为：
-   - 收集需求
-   - 撰写初稿
-   - 内部评审
-```
-
-### 🧠 AI 增强解析
-
-**自动启用**，无需特殊命令。当遇到复杂或歧义的任务描述时，AI 会自动介入提高准确率。
-
-**改进点：**
-- 更准确的时间理解
-- 自动识别优先级关键词
-- 智能提取备注信息
-- 理解复杂的任务描述
-
----
-
-## 📁 项目结构
+## 项目结构
 
 ```
 .
 ├── src/
-│   ├── app.ts          # 主应用逻辑和事件路由
-│   ├── feishu.ts       # 飞书 API 封装
-│   ├── ai.ts           # AI 客户端和提示词
-│   ├── parser.ts       # 自然语言解析
-│   ├── cards.ts        # 飞书卡片生成
-│   ├── config.ts       # 配置管理
-│   ├── types.ts        # TypeScript 类型定义
-│   └── index.ts        # 服务入口
-├── test/               # 单元测试
-├── .env.example        # 环境变量模板
-├── README.md           # 本文件
-├── AI_FEATURES.md      # AI 功能详细文档
-├── QUICK_START.md      # 快速开始指南
-├── DEPLOYMENT.md       # 部署指南
-└── 配置飞书回调.md     # 飞书回调配置指南
+│   ├── index.ts                  # 服务入口（启动 cron + http）
+│   ├── app.ts                    # 路由 / 事件分发
+│   ├── feishu.ts                 # 飞书 API 封装
+│   ├── ai.ts                     # AI 入口（意图分析 / 闲聊）
+│   ├── parser.ts                 # 自然语言解析（不依赖 AI）
+│   ├── cards.ts                  # 飞书卡片模板
+│   ├── lark-cli.ts               # lark-cli 调用（日历/审批等）
+│   ├── config.ts / types.ts / time.ts / openai.ts
+│   ├── agent/                    # AI Agent（多轮工具调用）
+│   │   ├── agent.ts
+│   │   ├── prompt.ts
+│   │   └── tools/                # 工具集（todo / memory / lark）
+│   ├── ai/                       # AI Provider 抽象（OpenAI 兼容）
+│   ├── scheduler/                # 每日提醒 / 截止提醒 / 对账
+│   │   ├── daily-reminder.ts
+│   │   ├── deadline-reminder.ts
+│   │   └── time-utils.ts
+│   ├── storage/                  # SQLite（对话/记忆/操作日志/提醒投影）
+│   ├── formatters/               # 结果格式化
+│   └── history/                  # 操作历史
+├── test/                         # 单元测试
+├── deploy-template/              # 云服务器部署模板（Windows Service）
+├── data/                         # 运行时 SQLite 数据库
+├── .env.example                  # 配置模板
+├── 快速启动.bat / 停止服务.bat   # Windows 启动脚本
+├── package.json / tsconfig.json
+└── README.md
 ```
 
 ---
 
-## 🧪 测试
+## 开发与部署
 
-运行单元测试：
-
+### 开发命令
 ```bash
-npm test
+npm run dev        # 热重载开发模式
+npm run build      # 编译 TS 到 dist/
+npm start          # 生产模式（先 build）
+npm test           # 单元测试
+npm run check-env  # 环境变量自检
 ```
 
-测试覆盖：
-- 事件处理逻辑
-- 自然语言解析
-- 飞书 API 调用
-- 卡片生成
+### 本地开发 + 内网穿透
+飞书需要公网回调地址。本地开发可用：
+- **Cloudflare Tunnel**（免费、稳定）：`cloudflared tunnel --url http://localhost:17234`
+- **ngrok**：`ngrok http 17234`
+- **frp / 自建反代**
+
+把 `https://xxx.trycloudflare.com/feishu/events` 配到飞书后台即可。
+
+### 云服务器部署
+`deploy-template/` 里有完整的 Windows 服务部署方案：
+- `install-service.ps1` 装成 Windows Service
+- `start.ps1` / `uninstall-service.ps1` 启停
+- `README-DEPLOY.md` / `README-ECS-DEPLOY.md` 阿里云 ECS 部署文档
+- 配合 `Caddyfile.example` 做反向代理 + HTTPS
 
 ---
 
-## 📦 部署
+## 故障排查
 
-### 本地开发
+### Bot 完全不回应
+1. 服务起来了吗：`curl http://localhost:17234/health`
+2. 飞书后台回调地址正确？走的是 `https`？
+3. 看日志有没有 `[feishu] message event ...`
 
-使用内网穿透工具（ngrok、localtunnel、Cloudflare Tunnel）将本地服务暴露到公网。
+### 待办创建失败
+1. `FEISHU_BASE_TOKEN` / `FEISHU_BASE_TABLE_ID` 对不对
+2. App 是否有 `bitable:app` 权限
+3. 字段名跟表格里完全一致？空格、大小写都要对
 
-详见：[配置飞书回调.md](./配置飞书回调.md)
+### AI 不工作
+1. `OPENAI_API_KEY` 填了？
+2. `OPENAI_API_BASE_URL` 能 ping 通吗
+3. 看日志的 `[ai]` `[agent]` 行排错
 
-### 生产部署
-
-支持多种部署方式：
-
-1. **云服务器**（阿里云、腾讯云等）
-2. **容器化部署**（Docker、K8s）
-3. **Serverless 平台**（Vercel、Railway 等）
-
-详见：[DEPLOYMENT.md](./DEPLOYMENT.md)
-
----
-
-## 🔧 高级配置
-
-### 自定义多维表格字段
-
-编辑 `src/feishu.ts` 中的字段映射：
-
-```typescript
-const fields = {
-  "待办事项": task.title,
-  "截止日期": task.due?.timestamp,
-  "优先级": task.priority,
-  "执行人": task.assigneeOpenId,
-  // 添加更多自定义字段
-};
-```
-
-### 自定义 AI 提示词
-
-编辑 `src/ai.ts` 中的提示词模板：
-
-```typescript
-const TASK_PARSE_PROMPT = `
-你是一个任务解析助手...
-[自定义你的提示词]
-`;
-```
-
-### 集成其他 AI 服务
-
-支持任何 OpenAI 兼容的 API：
-
-- **Ollama**: `http://localhost:11434/v1`
-- **LM Studio**: `http://localhost:1234/v1`
-- **Azure OpenAI**: `https://your-resource.openai.azure.com/`
-- **自定义部署**: 任何兼容接口
+### 定时提醒没收到
+1. 服务一直在线吗？关机的时间不会补发
+2. 浏览器访问 `/admin/test-reminder?slot=morning` 立即触发一次试试
+3. 表格记录里"执行人"字段填了吗？没填就跳过
 
 ---
 
-## 📚 文档
+## License
 
-- [AI_FEATURES.md](./AI_FEATURES.md) - AI 功能详细使用指南
-- [QUICK_START.md](./QUICK_START.md) - 快速开始指南
-- [DEPLOYMENT.md](./DEPLOYMENT.md) - 生产环境部署指南
-- [配置飞书回调.md](./配置飞书回调.md) - 飞书回调配置步骤
-
----
-
-## 🛠️ 开发命令
-
-```bash
-npm run dev          # 开发模式（热重载）
-npm run build        # 编译 TypeScript
-npm start            # 生产模式启动
-npm test             # 运行测试
-npm run check-env    # 检查环境配置
-```
-
----
-
-## 🐛 故障排查
-
-### 机器人不响应
-
-1. 检查服务是否运行：`curl http://localhost:3000/health`
-2. 检查飞书回调地址配置是否正确
-3. 查看服务日志排查错误
-4. 确认飞书应用权限已开通
-
-### 任务创建失败
-
-1. 确认 `FEISHU_BASE_TOKEN` 和 `FEISHU_BASE_TABLE_ID` 正确
-2. 确认应用有多维表格读写权限
-3. 检查多维表格字段名称是否匹配
-
-### AI 功能不工作
-
-1. 确认 `OPENAI_API_KEY` 配置正确
-2. 确认对应功能开关已启用
-3. 检查 API 配额是否充足
-4. 查看日志获取详细错误信息
-
----
-
-## 💡 最佳实践
-
-1. **任务描述清晰** - 包含明确的时间、优先级信息
-2. **定期优化** - 每天早上使用"优化"命令整理任务
-3. **善用图片识别** - 会议通知、聊天记录直接截图发送
-4. **批量创建** - 多个任务用分号分隔，一次性创建
-5. **确认后再写入** - 仔细检查确认卡片，避免错误
-
----
-
-## 🔐 安全建议
-
-1. **保护敏感信息**
-   - 不要将 `.env` 文件提交到 Git
-   - 定期轮换 API 密钥
-   - 使用环境变量管理凭据
-
-2. **图片隐私**
-   - 图片会发送到 AI API 分析
-   - 避免上传包含敏感信息的截图
-   - 了解 API 提供商的数据政策
-
-3. **访问控制**
-   - 仅授权必要的飞书权限
-   - 定期审查应用权限
-   - 监控异常访问
-
----
-
-## 📊 性能指标
-
-- **响应时间**
-  - 文本解析：~1-2秒
-  - 图片识别：~3-5秒
-  - 智能优化：~2-4秒
-
-- **并发支持**
-  - 单实例可处理 100+ 并发请求
-  - 支持水平扩展
-
----
-
-## 🎯 路线图
-
-- [ ] 支持语音输入
-- [ ] 任务提醒功能
-- [ ] 周报/月报自动生成
-- [ ] 团队协作功能
-- [ ] 移动端优化
-- [ ] 更多 AI 模型支持
-
----
-
-## 📄 许可证
-
-MIT License
-
----
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
----
-
-## 📞 支持
-
-如有问题或建议：
-
-1. 查看文档：[AI_FEATURES.md](./AI_FEATURES.md)、[DEPLOYMENT.md](./DEPLOYMENT.md)
-2. 检查日志：`npm run dev` 查看实时日志
-3. 测试配置：`npm run check-env` 验证环境变量
-4. 提交 Issue：在 GitHub 上报告问题
-
----
-
-## 🎉 致谢
-
-感谢飞书开放平台提供的强大 API 支持！
+MIT

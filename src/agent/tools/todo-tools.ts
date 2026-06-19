@@ -2,8 +2,17 @@
  * 待办相关工具
  */
 import type { AgentTool, ToolContext, ToolResult } from "./types.js";
-import { toBaseRecordFields } from "../../ai.js";
 import type { TodoParseItem } from "../../ai.js";
+import { cancelReminders } from "../../storage/index.js";
+
+function safeCancelReminders(recordId: string): void {
+  try {
+    cancelReminders(recordId);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error(`[deadline] cancel reminder failed for ${recordId}: ${msg}`);
+  }
+}
 
 /**
  * 列出待办
@@ -36,10 +45,10 @@ export const listTodosTool: AgentTool = {
       const records = await ctx.feishuClient.listRecords({ pageSize: limit });
 
       let filtered = records;
-      if (args.status === "pending") {
-        filtered = records.filter(r => !r.fields["是否已完成"]);
-      } else if (args.status === "completed") {
+      if (args.status === "completed") {
         filtered = records.filter(r => r.fields["是否已完成"]);
+      } else if (args.status !== "all") {
+        filtered = records.filter(r => !r.fields["是否已完成"]);
       }
 
       const todos = filtered.map(r => ({
@@ -114,8 +123,6 @@ export const createTodoTool: AgentTool = {
         ...(ctx.userId ? { assigneeOpenId: ctx.userId } : {}),
       };
 
-      const fields = toBaseRecordFields(item);
-      // 通过 feishuClient 的内部方法创建（带字段降级）
       const results = await ctx.feishuClient.createTodoRecordsOneByOne({ items: [item] });
 
       return {
@@ -163,8 +170,8 @@ export const completeTodoTool: AgentTool = {
       // 如果没有 id，按标题搜索
       if (!recordId && args.title) {
         const records = await ctx.feishuClient.listRecords({ pageSize: 100 });
-        const matched = records.find(r => 
-          String(r.fields["待办事项"] || "").includes(String(args.title))
+        const matched = records.find(r =>
+          !r.fields["是否已完成"] && String(r.fields["待办事项"] || "").includes(String(args.title))
         );
         if (!matched) {
           return { success: false, error: `未找到包含"${args.title}"的待办` };
@@ -177,6 +184,7 @@ export const completeTodoTool: AgentTool = {
       }
 
       await ctx.feishuClient.updateRecord(recordId, { 是否已完成: true });
+      safeCancelReminders(recordId);
 
       return {
         success: true,
@@ -216,7 +224,7 @@ export const deleteTodoTool: AgentTool = {
       if (!recordId && args.title) {
         const records = await ctx.feishuClient.listRecords({ pageSize: 100 });
         const matched = records.find(r =>
-          String(r.fields["待办事项"] || "").includes(String(args.title))
+          !r.fields["是否已完成"] && String(r.fields["待办事项"] || "").includes(String(args.title))
         );
         if (!matched) {
           return { success: false, error: `未找到包含"${args.title}"的待办` };
@@ -229,6 +237,7 @@ export const deleteTodoTool: AgentTool = {
       }
 
       await ctx.feishuClient.deleteRecord(recordId);
+      safeCancelReminders(recordId);
 
       return { success: true, message: "已删除" };
     } catch (error) {

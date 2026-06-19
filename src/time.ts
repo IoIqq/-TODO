@@ -48,6 +48,10 @@ export function utcMidnightForDate(year: number, month: number, day: number): nu
   return Date.UTC(year, month - 1, day, 0, 0, 0, 0);
 }
 
+export function allDayDeadlineUtcMs(year: number, month: number, day: number, timeZone: string): number {
+  return zonedDateTimeToUtcMs({ year, month, day, hour: 23, minute: 59, second: 0 }, timeZone);
+}
+
 export function zonedDateTimeToUtcMs(parts: {
   year: number;
   month: number;
